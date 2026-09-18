@@ -1,0 +1,9 @@
+zone_name: "Cuadra 01 - Piloto"
+
+# Fuente: "0"=webcam | "video.mp4"=archivo | "rtsp://..."=camara real
+source: "0"
+
+detector:
+  model: "yolo11n.pt"
+  conf: 0.5
+  device: null
