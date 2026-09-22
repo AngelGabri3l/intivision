@@ -7,3 +7,10 @@ detector:
   model: "yolo11n.pt"
   conf: 0.5
   device: null
+
+# ---- POSTURA (YOLO-Pose) ----
+pose:
+  enabled: true
+  model: "yolo11n-pose.pt"
+  conf: 0.4
+  device: null
