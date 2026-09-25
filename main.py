@@ -1,25 +1,34 @@
 """
-main.py — Detector en vivo GUARDIAN.
+main.py — Detector en vivo GUARDIAN (cámara o video) con puntaje de amenaza.
 
-La fuente de video y el modelo se configuran en config.yaml.
+Pipeline: capturar -> detectar personas -> (pose) -> puntuar la amenaza.
+Por ahora muestra el nivel BAJO/MEDIO/ALTO en pantalla y en el log.
 
 Ejemplos:
-    python main.py                       # usa config.yaml
+    python main.py                       # webcam (config.yaml)
     python main.py --source video.mp4    # analizar un archivo
     python main.py --source "rtsp://usuario:clave@ip:554/stream1"
-    python main.py --no-window           # sin ventana
+    python main.py --no-window           # sin ventana (mini PC / Docker)
 """
 import argparse
 import time
 import logging
+import datetime
 
 import cv2
+import numpy as np
 import yaml
 
 from detector import PersonDetector
+from pose_detector import PoseDetector
+from threat_scoring import ThreatScorer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("guardian")
+
+LEVEL_COLOR = {"NINGUNO": (120, 120, 120), "BAJO": (0, 200, 0),
+               "MEDIO": (0, 165, 255), "ALTO": (0, 0, 255)}
+LEVEL_COOLDOWN = {"BAJO": 60, "MEDIO": 45, "ALTO": 20}
 
 
 def load_config(path):
@@ -32,7 +41,7 @@ def load_config(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="GUARDIAN - deteccion de personas")
+    ap = argparse.ArgumentParser(description="GUARDIAN - deteccion y puntaje de amenaza")
     ap.add_argument("--source", default=None)
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--no-window", action="store_true")
@@ -46,12 +55,40 @@ def main():
     detector = PersonDetector(det_cfg.get("model", "yolo11n.pt"),
                               det_cfg.get("conf", 0.5), det_cfg.get("device"))
 
+    pose_cfg = cfg.get("pose", {})
+    pose_detector = None
+    if pose_cfg.get("enabled", False):
+        pose_detector = PoseDetector(pose_cfg.get("model", "yolo11n-pose.pt"),
+                                     pose_cfg.get("conf", 0.4), pose_cfg.get("device"))
+        log.info("Deteccion de postura ACTIVADA")
+
+    sc = cfg.get("scoring", {})
+    scorer = ThreatScorer(
+        weights=sc.get("weights", {}),
+        thresholds=sc.get("thresholds", {"medium": 3, "high": 6}),
+        restricted_zone=sc.get("restricted_zone"),
+        loitering_seconds=sc.get("loitering_seconds", 15),
+        group_size=sc.get("group_size", 3),
+        sensitive_hours=sc.get("sensitive_hours", [22, 6]),
+        persistence_frames=sc.get("persistence_frames", 5),
+        window=sc.get("window", 8))
+    zone = sc.get("restricted_zone") or []
+
+    zone_name = cfg.get("zone_name", "Cuadra 01")
+    last_fired = {}
+
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         log.error("No se pudo abrir la fuente: %s", source)
         return
-    log.info("GUARDIAN iniciado. Fuente=%s", source)
+    log.info("GUARDIAN iniciado. Fuente=%s  Zona=%s", source, zone_name)
     is_file = isinstance(source, str) and source.lower().endswith((".mp4", ".avi", ".mov"))
+
+    def can_fire(level, now):
+        if now - last_fired.get(level, 0) >= LEVEL_COOLDOWN.get(level, 30):
+            last_fired[level] = now
+            return True
+        return False
 
     try:
         while True:
@@ -60,15 +97,46 @@ def main():
                 if is_file:
                     log.info("Fin del video.")
                     break
-                time.sleep(0.5)   # la camara RTSP perdio un frame: reintentar
+                time.sleep(0.5)
                 continue
 
+            now_ts = time.time()
+            now_dt = datetime.datetime.now()
+
             detections = detector.detect(frame)
+            postures, pose_results = set(), []
+            if pose_detector and detections:
+                pose_results = pose_detector.analyze(frame)
+                for pr in pose_results:
+                    postures |= pr["postures"]
+            result = scorer.evaluate(detections, now_ts, now_dt, postures)
+            level = result["level"]
+
             for d in detections:
                 x1, y1, x2, y2 = d["bbox"]
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
                 cv2.putText(frame, f'{d["conf"]:.0%}', (x1, y1 - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+            for pr in pose_results:
+                if pr["postures"]:
+                    bx1, by1, bx2, by2 = pr["bbox"]
+                    cv2.putText(frame, "/".join(pr["postures"]), (bx1, by2 + 18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            if len(zone) >= 3:
+                cv2.polylines(frame, [np.array(zone, dtype=np.int32)], True, (255, 0, 0), 2)
+            color = LEVEL_COLOR.get(level, (120, 120, 120))
+            label = f"AMENAZA: {level} (puntaje {result['score']}) {', '.join(result['reasons'])}"
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], 28), color, -1)
+            cv2.putText(frame, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
+            if level != "NINGUNO" and can_fire(level, now_ts):
+                t = now_dt.strftime("%H:%M:%S")
+                if level == "ALTO":
+                    log.warning("AMENAZA ALTA en %s (%s) - %s", zone_name, t, ", ".join(result["reasons"]))
+                elif level == "MEDIO":
+                    log.warning("Amenaza MEDIA en %s (%s) - %s", zone_name, t, ", ".join(result["reasons"]))
+                else:
+                    log.info("Actividad BAJA en %s (%s)", zone_name, t)
 
             if not args.no_window:
                 cv2.imshow("GUARDIAN - prototipo (q para salir)", frame)

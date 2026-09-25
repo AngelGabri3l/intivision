@@ -8,6 +8,28 @@ detector:
   conf: 0.5
   device: null
 
+# ---- PUNTAJE DE AMENAZA ----
+scoring:
+  weights:
+    person_present: 1
+    in_restricted_zone: 3
+    sensitive_hour: 2
+    loitering: 2
+    group: 2
+    # postura
+    climbing: 3
+    fallen: 3
+    hands_up: 3
+  thresholds:
+    medium: 3
+    high: 6
+  loitering_seconds: 15
+  group_size: 3
+  sensitive_hours: [22, 6]
+  persistence_frames: 5
+  window: 8
+  restricted_zone: []
+
 # ---- POSTURA (YOLO-Pose) ----
 pose:
   enabled: true
