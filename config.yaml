@@ -36,3 +36,12 @@ pose:
   model: "yolo11n-pose.pt"
   conf: 0.4
   device: null
+
+actuator:
+  type: "mqtt"         
+  siren_seconds: 10
+  host: "broker.hivemq.com"
+  port: 1883
+  topic: "guardian/demo7k3x9/siren"
+  username: null       
+  password: null       
