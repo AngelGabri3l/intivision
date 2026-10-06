@@ -46,6 +46,11 @@ actuator:
   username: null       
   password: null       
 
+notifier:
+  events_dir: "events"
+  telegram_token: null
+  telegram_chat_id: null
+
 clip:
   enabled: true
   seconds: 15
