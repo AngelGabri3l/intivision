@@ -8,3 +8,4 @@ __pycache__/
 *.pt
 *.mp4
 events/
+.env

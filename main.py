@@ -1,14 +1,10 @@
 """
-main.py — Detector en vivo GUARDIAN (cámara o video) con puntaje de amenaza.
+main.py — Detector en vivo (cámara o video) con puntaje de amenaza.
 
-Pipeline: capturar -> detectar personas -> (pose) -> puntuar la amenaza.
-Por ahora muestra el nivel BAJO/MEDIO/ALTO en pantalla y en el log.
+Pipeline: capturar -> detectar personas -> (pose) -> puntuar -> responder.
+Respuesta escalonada BAJO/MEDIO/ALTO. Guarda clip de evidencia y notifica.
 
-Ejemplos:
-    python main.py                       # webcam (config.yaml)
-    python main.py --source video.mp4    # analizar un archivo
-    python main.py --source "rtsp://usuario:clave@ip:554/stream1"
-    python main.py --no-window           # sin ventana (mini PC / Docker)
+
 """
 import argparse
 import time
@@ -17,11 +13,14 @@ import datetime
 
 import cv2
 import numpy as np
-import yaml
 
 from detector import PersonDetector
 from pose_detector import PoseDetector
 from threat_scoring import ThreatScorer
+from actuator import build_actuator
+from notifier import Notifier
+from video_buffer import VideoBuffer
+from settings import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("guardian")
@@ -29,15 +28,6 @@ log = logging.getLogger("guardian")
 LEVEL_COLOR = {"NINGUNO": (120, 120, 120), "BAJO": (0, 200, 0),
                "MEDIO": (0, 165, 255), "ALTO": (0, 0, 255)}
 LEVEL_COOLDOWN = {"BAJO": 60, "MEDIO": 45, "ALTO": 20}
-
-
-def load_config(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        log.warning("No se encontro %s; uso valores por defecto.", path)
-        return {}
 
 
 def main():
@@ -74,6 +64,17 @@ def main():
         window=sc.get("window", 8))
     zone = sc.get("restricted_zone") or []
 
+    actuator = build_actuator(cfg)
+    siren_s = cfg.get("actuator", {}).get("siren_seconds", 10)
+
+    ncfg = cfg.get("notifier", {})
+    events_dir = ncfg.get("events_dir", "events")
+    notifier = Notifier(events_dir, ncfg.get("telegram_token"), ncfg.get("telegram_chat_id"))
+
+    cl = cfg.get("clip", {})
+    vbuf = VideoBuffer(cl.get("seconds", 15), cl.get("fps", 8), cl.get("max_width", 640)) \
+        if cl.get("enabled", True) else None
+
     zone_name = cfg.get("zone_name", "Cuadra 01")
     last_fired = {}
 
@@ -102,6 +103,8 @@ def main():
 
             now_ts = time.time()
             now_dt = datetime.datetime.now()
+            if vbuf is not None:
+                vbuf.push(frame)
 
             detections = detector.detect(frame)
             postures, pose_results = set(), []
@@ -131,12 +134,23 @@ def main():
 
             if level != "NINGUNO" and can_fire(level, now_ts):
                 t = now_dt.strftime("%H:%M:%S")
+                best = max((d["conf"] for d in detections), default=0.0)
+                meta = {"zone": zone_name, "conf": best, "time": t, "level": level,
+                        "score": result["score"], "reasons": result["reasons"]}
+                clip_path = None
+                if vbuf is not None:
+                    clip_path = vbuf.save_clip(f"{events_dir}/clip_{now_dt.strftime('%Y%m%d_%H%M%S')}.mp4")
                 if level == "ALTO":
                     log.warning("AMENAZA ALTA en %s (%s) - %s", zone_name, t, ", ".join(result["reasons"]))
+                    actuator.trigger(siren_s)
+                    notifier.notify(frame, meta, clip_path)
                 elif level == "MEDIO":
                     log.warning("Amenaza MEDIA en %s (%s) - %s", zone_name, t, ", ".join(result["reasons"]))
+                    actuator.warn()
+                    notifier.notify(frame, meta, clip_path)
                 else:
                     log.info("Actividad BAJA en %s (%s)", zone_name, t)
+                    notifier.notify(frame, meta, clip_path)
 
             if not args.no_window:
                 cv2.imshow("GUARDIAN - prototipo (q para salir)", frame)
