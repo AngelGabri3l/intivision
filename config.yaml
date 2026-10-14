@@ -37,6 +37,10 @@ pose:
   conf: 0.4
   device: null
 
+analysis:
+  sample_every: 3      
+  event_cooldown_s: 5   
+
 actuator:
   type: "mqtt"         
   siren_seconds: 10
