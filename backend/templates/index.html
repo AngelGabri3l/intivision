@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GUARDIAN — Panel</title>
+</head>
+<body style="font-family:Arial;margin:0;background:#f4f6f9;color:#222">
+  <header style="background:#1F3864;color:#fff;padding:16px 20px">
+    <h2 style="margin:0">GUARDIAN — Panel de Evidencia</h2>
+    <div style="opacity:.8;font-size:13px">Historial de amenazas detectadas</div>
+  </header>
+  <main style="max-width:1000px;margin:20px auto;padding:0 16px">
+    <section style="background:#fff;border-radius:10px;padding:16px;margin-bottom:20px">
+      <h3 style="margin-top:0">Analizar un video</h3>
+      <input type="file" id="f" accept="video/*">
+      <button onclick="up()" style="background:#1F3864;color:#fff;border:0;padding:8px 16px;border-radius:6px;cursor:pointer">Analizar</button>
+      <span id="msg" style="margin-left:10px;color:#666"></span>
+    </section>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px">
+      {cards}
+    </div>
+  </main>
+  <script>
+    async function up() {
+      const f = document.getElementById('f').files[0];
+      const msg = document.getElementById('msg');
+      if (!f) { msg.textContent = 'Elige un video.'; return; }
+      msg.textContent = 'Analizando... (puede tardar)';
+      const fd = new FormData(); fd.append('video', f);
+      const r = await fetch('/analyze', {method:'POST', body:fd});
+      const j = await r.json();
+      if (j.error) { msg.textContent = 'Error: ' + j.error; return; }
+      msg.textContent = j.eventos_detectados + ' evento(s). Recargando...';
+      setTimeout(()=>location.reload(), 1200);
+    }
+  </script>
+</body>
+</html>
