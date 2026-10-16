@@ -40,6 +40,7 @@ pose:
 analysis:
   sample_every: 3      
   event_cooldown_s: 5   
+  dispatch_alerts: true 
 
 actuator:
   type: "mqtt"         

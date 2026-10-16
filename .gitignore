@@ -9,3 +9,4 @@ __pycache__/
 *.mp4
 events/
 .env
+backend/data/
