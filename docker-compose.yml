@@ -1,0 +1,47 @@
+services:
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: guardian-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro    
+      - ./events:/app/events                  
+      - ./backend/data:/app/backend/data    
+
+  detector:
+    build: .
+    container_name: guardian-detector
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./events:/app/events
+    depends_on:
+      - mqtt
+    profiles: ["live"]   
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: guardian-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    profiles: ["live"]

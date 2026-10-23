@@ -34,7 +34,6 @@ def main():
     ap = argparse.ArgumentParser(description="GUARDIAN - deteccion y puntaje de amenaza")
     ap.add_argument("--source", default=None)
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--no-window", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -152,13 +151,8 @@ def main():
                     log.info("Actividad BAJA en %s (%s)", zone_name, t)
                     notifier.notify(frame, meta, clip_path)
 
-            if not args.no_window:
-                cv2.imshow("GUARDIAN - prototipo (q para salir)", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
     finally:
         cap.release()
-        cv2.destroyAllWindows()
         log.info("GUARDIAN detenido.")
 
 
