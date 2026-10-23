@@ -18,4 +18,4 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-p
 
 COPY . .
 
-CMD ["python", "main.py", "--no-window"]
+CMD ["python", "main.py"]
