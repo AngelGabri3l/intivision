@@ -2,7 +2,8 @@
 app.py — Backend de GUARDIAN (FastAPI + SQLite).
 
 Qué hace:
-  - Sube un VIDEO y lo analiza con el motor de detección (GuardianEngine).
+  - Analiza la CÁMARA EN VIVO del navegador (WebSocket /ws/live).
+  - (Opcional) Sube un VIDEO y lo analiza con el motor de detección (GuardianEngine).
   - Guarda cada evento de amenaza en una base de datos SQLite.
   - Muestra el historial de evidencia en una página web simple.
   - Recibe eventos del detector en vivo (POST /ingest), para unificar todo.
@@ -14,6 +15,7 @@ Correr en local:
 """
 import os
 import sys
+import asyncio
 import json
 import time
 import sqlite3
@@ -21,7 +23,9 @@ import shutil
 import logging
 import datetime
 
-from fastapi import FastAPI, UploadFile, File, Request
+import cv2
+import numpy as np
+from fastapi import FastAPI, UploadFile, File, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
@@ -156,6 +160,62 @@ def health():
     return {"status": "ok"}
 
 
+
+# ---------------------- CÁMARA EN VIVO ----------------------
+
+LEVEL_COOLDOWN = {"MEDIO": 45, "ALTO": 20}   # segundos entre alertas externas (MQTT/Telegram)
+_last_alert = {}
+
+
+def dispatch_live_alert(event):
+    """Alerta externa de un evento en vivo (con cooldown por nivel para no saturar)."""
+    d = get_dispatcher()
+    if not d["enabled"]:
+        return
+    now = time.time()
+    level = event["level"]
+    if now - _last_alert.get(level, 0) < LEVEL_COOLDOWN.get(level, 30):
+        return
+    _last_alert[level] = now
+    log.warning("EN VIVO | nivel %s | puntaje %s | %s", level, event["score"], event["reasons"])
+    if level == "ALTO":
+        d["actuator"].trigger(d["siren_s"])
+    elif level == "MEDIO":
+        d["actuator"].warn()
+    meta = {"zone": d["zone"], "level": level, "score": event["score"],
+            "reasons": event["reasons"].split(", ") if event["reasons"] else [],
+            "time": datetime.datetime.now().strftime("%H:%M:%S")}
+    d["notifier"].send_photo(os.path.join(EVIDENCE_DIR, event["image"]), meta)
+
+
+def _process_frame(session, data):
+    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        return None
+    out = session.process(frame)
+    if out["event"]:
+        insert_event(out["event"])
+        dispatch_live_alert(out["event"])
+    return out
+
+
+@app.websocket("/ws/live")
+async def ws_live(ws: WebSocket):
+    """El navegador manda frames JPEG (binario); responde JSON con cajas y nivel."""
+    await ws.accept()
+    session = get_engine().new_session(EVIDENCE_DIR)
+    log.info("Cámara en vivo conectada.")
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            # La inferencia es bloqueante: se ejecuta en un hilo para no frenar el servidor.
+            out = await asyncio.to_thread(_process_frame, session, data)
+            if out is not None:
+                await ws.send_json(out)
+    except WebSocketDisconnect:
+        log.info("Cámara en vivo desconectada.")
+
+
 @app.post("/analyze")
 async def analyze(video: UploadFile = File(...)):
     """Sube un video, lo analiza y guarda los eventos encontrados."""
@@ -224,7 +284,7 @@ def home():
           <div style="font-size:12px;color:#888;margin-top:6px">{r["source"]} · {vt} · {r["created_at"]}</div>
         </div>"""
     if not cards:
-        cards = '<p style="color:#888">Aun no hay eventos. Sube un video para analizar.</p>'
+        cards = '<p style="color:#888">Aun no hay eventos. Inicia la cámara para monitorear.</p>'
     tpl_path = os.path.join(BASE, "backend", "templates", "index.html")
     with open(tpl_path, encoding="utf-8") as fh:
         template = fh.read()
