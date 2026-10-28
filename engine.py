@@ -6,6 +6,8 @@ ofrece analyze_video() para procesar un VIDEO SUBIDO (no cámara en vivo). Lo us
 backend. Así la misma inteligencia sirve en vivo y para análisis bajo demanda.
 """
 import os
+import time
+import threading
 import datetime
 
 import cv2
@@ -31,7 +33,7 @@ class GuardianEngine:
                      if p.get("enabled", False) else None)
 
         s = cfg.get("scoring", {})
-        self.scorer = ThreatScorer(
+        self._scorer_kwargs = dict(
             weights=s.get("weights", DEFAULT_WEIGHTS),
             thresholds=s.get("thresholds", {"medium": 3, "high": 6}),
             restricted_zone=s.get("restricted_zone"),
@@ -41,6 +43,9 @@ class GuardianEngine:
             persistence_frames=s.get("persistence_frames", 5),
             window=s.get("window", 8),
         )
+        self.scorer = ThreatScorer(**self._scorer_kwargs)
+        # Los modelos YOLO se comparten entre clientes: un candado evita inferencias simultaneas.
+        self.infer_lock = threading.Lock()
         self.zone_name = cfg.get("zone_name", "Cuadra 01")
         self.sample_every = cfg.get("analysis", {}).get("sample_every", 3)
         self.event_cooldown_s = cfg.get("analysis", {}).get("event_cooldown_s", 5)
@@ -99,3 +104,63 @@ class GuardianEngine:
                 })
         cap.release()
         return events
+
+
+    def new_session(self, evidence_dir):
+        """Sesion de camara en vivo: scorer propio por cliente, modelos compartidos."""
+        return LiveSession(self, evidence_dir)
+
+
+class LiveSession:
+    """
+    Estado de UN cliente conectado por camara web (merodeo, ventana de persistencia,
+    cooldown de eventos). Cada frame que llega del navegador pasa por process().
+    """
+
+    def __init__(self, engine, evidence_dir):
+        self.engine = engine
+        self.scorer = ThreatScorer(**engine._scorer_kwargs)
+        self.evidence_dir = evidence_dir
+        self.last_event_ts = 0.0
+        os.makedirs(evidence_dir, exist_ok=True)
+
+    def process(self, frame):
+        eng = self.engine
+        now_ts = time.time()                 # en vivo el merodeo se mide con reloj real
+        now_dt = datetime.datetime.now()
+        h, w = frame.shape[:2]
+
+        with eng.infer_lock:
+            detections = eng.detector.detect(frame)
+            postures = set()
+            if eng.pose and detections:
+                for pr in eng.pose.analyze(frame):
+                    postures |= pr["postures"]
+
+        result = self.scorer.evaluate(detections, now_ts, now_dt, postures)
+        level = result["level"]
+        boxes = [{"bbox": [int(v) for v in d["bbox"]], "conf": float(d["conf"])}
+                 for d in detections]
+
+        event = None
+        if level in ("MEDIO", "ALTO") and now_ts - self.last_event_ts >= eng.event_cooldown_s:
+            self.last_event_ts = now_ts
+            vis = frame.copy()
+            for b in boxes:
+                x1, y1, x2, y2 = b["bbox"]
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            img_name = f"live_{now_dt.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+            cv2.imwrite(os.path.join(self.evidence_dir, img_name), vis)
+            event = {
+                "source": eng.zone_name + " (en vivo)",
+                "video_time_s": None,
+                "level": level,
+                "score": result["score"],
+                "reasons": ", ".join(result["reasons"]),
+                "image": img_name,
+                "people": result["people"],
+            }
+
+        return {"width": w, "height": h, "level": level, "score": result["score"],
+                "reasons": result["reasons"], "people": result["people"],
+                "boxes": boxes, "event": event}
