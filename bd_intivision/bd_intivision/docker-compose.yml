@@ -1,0 +1,30 @@
+name: bd_intivision
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: vigia-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vigia
+      POSTGRES_USER: vigia
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?mensaje de error}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema_vigia.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - vigia-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vigia -d vigia"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+
+networks:
+  vigia-net:
+    name: vigia-net
