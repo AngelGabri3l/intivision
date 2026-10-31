@@ -1,0 +1,6 @@
+# Evita que Windows convierta los saltos de línea (CRLF) y rompa los scripts en Linux.
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.py   text eol=lf
