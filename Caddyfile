@@ -1,0 +1,10 @@
+intivision.online {
+	basic_auth {
+		angel $2a$14$MGwH.KQisJP4feBvUka8k.7TnilJW3D2TpOG6Srh626Mkkp7DO1I6
+	}
+	reverse_proxy backend:8000
+}
+
+www.intivision.online {
+	redir https://intivision.online{uri} permanent
+}
