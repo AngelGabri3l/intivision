@@ -10,6 +10,8 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=${DATABASE_URL:?Define DATABASE_URL en el archivo .env}
+      - COMMUNITY_SLUG=${COMMUNITY_SLUG:?Define COMMUNITY_SLUG en el archivo .env}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - MQTT_USERNAME=${MQTT_USERNAME:-}
@@ -18,6 +20,9 @@ services:
       - ./config.yaml:/app/config.yaml:ro    
       - ./events:/app/events                  
       - ./backend/data:/app/backend/data    
+    networks:
+      - default
+      - vigia-net
 
   detector:
     build: .
@@ -59,3 +64,7 @@ services:
       - backend
 volumes:
   caddy_data:
+
+networks:
+  vigia-net:
+    external: true

@@ -1,11 +1,3 @@
-"""
-detector.py — Detección de personas con YOLO.
-
-Modelo 'nano' (yolo11n) por velocidad en el borde. Filtra solo la clase 'person'
-(id 0 de COCO) para no gastar cómputo en otros objetos.
-"""
-
-
 class PersonDetector:
     PERSON_CLASS_ID = 0
 
