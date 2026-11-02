@@ -1,42 +1,34 @@
-"""
-app.py — Backend de GUARDIAN (FastAPI + SQLite).
-
-Qué hace:
-  - Analiza la CÁMARA EN VIVO del navegador (WebSocket /ws/live).
-  - (Opcional) Sube un VIDEO y lo analiza con el motor de detección (GuardianEngine).
-  - Guarda cada evento de amenaza en una base de datos SQLite.
-  - Muestra el historial de evidencia en una página web simple.
-  - Recibe eventos del detector en vivo (POST /ingest), para unificar todo.
-
-Correr en local:
-    pip install -r backend/requirements.txt
-    uvicorn backend.app:app --reload --port 8000
-    # abre http://localhost:8000
-"""
 import os
+import re
 import sys
 import asyncio
-import json
 import time
-import sqlite3
-import shutil
+import tempfile
 import logging
 import datetime
+import html
 
 import cv2
 import numpy as np
+import psycopg2
+import psycopg2.pool
 from fastapi import FastAPI, UploadFile, File, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from backend import db  # noqa: E402
+
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE, "backend", "data")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 EVIDENCE_DIR = os.path.join(BASE, "events")  # compartido con el detector
-DB_PATH = os.path.join(DATA_DIR, "guardian.db")
 CONFIG_PATH = os.path.join(BASE, "config.yaml")
+TEMPLATES_DIR = os.path.join(BASE, "backend", "templates")
+COMMUNITY_SLUG = os.environ.get("COMMUNITY_SLUG", "").strip()
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))   # igual que el límite de la página
+TMP_PREFIX = "vigia_upload_"                                    # nombre de los videos en análisis
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
@@ -48,31 +40,7 @@ log = logging.getLogger("backend")
 app = FastAPI(title="GUARDIAN Backend")
 _engine = None       # se crea en el primer análisis (carga modelos; puede tardar)
 _dispatcher = None   # actuador (MQTT) + notificador (Telegram), creado una vez
-
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                source TEXT,
-                video_time_s REAL,
-                level TEXT,
-                score INTEGER,
-                reasons TEXT,
-                image TEXT,
-                people INTEGER,
-                status TEXT DEFAULT 'sin verificar'
-            )
-        """)
-init_db()
+_community_id = None
 
 
 def load_cfg():
@@ -89,16 +57,139 @@ def get_engine():
     return _engine
 
 
-def insert_event(e):
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO events (created_at, source, video_time_s, level, score,
-               reasons, image, people, status) VALUES (?,?,?,?,?,?,?,?,?)""",
-            (datetime.datetime.now().isoformat(timespec="seconds"),
-             e.get("source"), e.get("video_time_s"), e.get("level"), e.get("score"),
-             e.get("reasons"), e.get("image"), e.get("people"),
-             e.get("status", "sin verificar")))
+# ---------------------- videos subidos (temporales) ----------------------
 
+def clean_leftovers():
+    """Si el servidor se cayó en pleno análisis, quedan videos a medias: se borran al arrancar."""
+    borrados = 0
+    for name in os.listdir(UPLOAD_DIR):
+        if name.startswith(TMP_PREFIX):
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, name))
+                borrados += 1
+            except OSError:
+                pass
+    return borrados
+
+
+def upload_too_big(request: Request) -> bool:
+    """Rechaza una subida enorme ANTES de recibirla, según la cabecera Content-Length."""
+    try:
+        declarado = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        return False
+    return declarado > (MAX_UPLOAD_MB + 1) * 1024 * 1024          # +1 MB de margen de la cabecera
+
+
+# ---------------------- comunidad ----------------------
+
+class CommunityNotConfigured(Exception):
+    """COMMUNITY_SLUG falta o la comunidad no existe en la base."""
+
+
+def get_community_id():
+    """Id de la comunidad donde se guardan los eventos (se busca una vez y se recuerda)."""
+    global _community_id
+    if _community_id is None:
+        if not COMMUNITY_SLUG:
+            raise CommunityNotConfigured("Falta la variable de entorno COMMUNITY_SLUG.")
+        with db.cursor() as cur:
+            cur.execute("SELECT id FROM communities WHERE slug = %s", (COMMUNITY_SLUG,))
+            row = cur.fetchone()
+        if row is None:
+            raise CommunityNotConfigured(
+                f"No existe la comunidad «{COMMUNITY_SLUG}». Créala con: python -m backend.manage "
+                f"create-community --name ... --slug {COMMUNITY_SLUG} --district-ubigeo ... --district-name ...")
+        _community_id = row["id"]
+    return _community_id
+
+
+# ---------------------- eventos en PostgreSQL ----------------------
+
+# Texto del motor de amenaza -> código del catálogo `signals` de la base.
+REASON_CODES = [
+    ("persona detectada", "person_present"),
+    ("en zona restringida", "in_restricted_zone"),
+    ("horario sensible", "sensitive_hour"),
+    ("merodeo", "loitering"),
+    ("grupo de", "group"),
+    ("trepando", "climbing"),
+    ("persona en el suelo", "fallen"),
+    ("posible asalto", "hands_up"),
+]
+DETAIL_CODES = {"loitering", "group"}          # estos llevan detalle ("merodeo 18s", "grupo de 3")
+SOURCE_LABELS = {"browser": "Cámara web", "video": "Video", "edge": "Mini PC"}
+
+
+def parse_reasons(reasons):
+    """'persona detectada, merodeo 18s' -> [('person_present', None), ('loitering', 'merodeo 18s')]"""
+    if isinstance(reasons, str):
+        items = [r.strip() for r in reasons.split(", ")]
+    else:
+        items = [str(r).strip() for r in (reasons or [])]
+    out = []
+    for item in items:
+        low = item.lower()
+        for prefix, code in REASON_CODES:
+            if low.startswith(prefix):
+                out.append((code, item if code in DETAIL_CODES else None))
+                break
+    return out
+
+
+def insert_event(e, source_kind="browser", community_id=None, camera_id=None):
+    """Guarda un evento con sus motivos (event_signals) y su imagen (media_files)."""
+    community = community_id or get_community_id()
+    image = os.path.basename(e["image"]) if e.get("image") else None
+    with db.cursor() as cur:
+        cur.execute(
+            """INSERT INTO events (community_id, camera_id, source, level, score, people_count,
+                                   status, video_time_s, occurred_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now()) RETURNING id""",
+            (community, camera_id, source_kind, e.get("level"), int(e.get("score") or 0),
+             int(e.get("people") or 0), e.get("status", "sin verificar"), e.get("video_time_s")))
+        event_id = cur.fetchone()["id"]
+        for code, detail in parse_reasons(e.get("reasons")):
+            cur.execute("""INSERT INTO event_signals (event_id, signal_code, detail)
+                           VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""", (event_id, code, detail))
+        if image:
+            try:
+                size = os.path.getsize(os.path.join(EVIDENCE_DIR, image))
+            except OSError:
+                size = 0
+            cur.execute(
+                """INSERT INTO media_files (community_id, camera_id, event_id, kind, storage_key, size_bytes)
+                   VALUES (%s,%s,%s,'image',%s,%s) ON CONFLICT (storage_key) DO NOTHING""",
+                (community, camera_id, event_id, image, size))
+    return event_id
+
+
+def list_events(limit=100):
+    """Los eventos más recientes de la comunidad, con motivos e imagen."""
+    limit = max(1, min(int(limit), 500))
+    with db.cursor() as cur:
+        cur.execute(
+            """SELECT e.id,
+                      to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+                      e.source, e.video_time_s, e.level, e.score,
+                      COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
+                                FROM event_signals es JOIN signals s ON s.code = es.signal_code
+                                WHERE es.event_id = e.id), '') AS reasons,
+                      (SELECT m.storage_key FROM media_files m
+                        WHERE m.event_id = e.id AND m.kind = 'image'
+                        ORDER BY m.created_at LIMIT 1) AS image,
+                      e.people_count AS people, e.status
+               FROM events e
+               WHERE e.community_id = %s
+               ORDER BY e.id DESC LIMIT %s""", (get_community_id(), limit))
+        rows = cur.fetchall()
+    for r in rows:
+        if r["video_time_s"] is not None:
+            r["video_time_s"] = float(r["video_time_s"])
+    return rows
+
+
+# ---------------------- alertas (actuador + Telegram) ----------------------
 
 def get_dispatcher():
     """Crea una sola vez el actuador (MQTT/simulado) y el notificador (Telegram)."""
@@ -147,22 +238,6 @@ def dispatch_alerts(events, source):
     d["notifier"].send_photo(os.path.join(EVIDENCE_DIR, worst["image"]), meta)
 
 
-# ---------------------- API ----------------------
-
-@app.on_event("startup")
-def startup():
-    log.warning("Backend GUARDIAN iniciado. Preparando actuador y notificador...")
-    get_dispatcher()
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-
-# ---------------------- CÁMARA EN VIVO ----------------------
-
 LEVEL_COOLDOWN = {"MEDIO": 45, "ALTO": 20}   # segundos entre alertas externas (MQTT/Telegram)
 _last_alert = {}
 
@@ -188,13 +263,68 @@ def dispatch_live_alert(event):
     d["notifier"].send_photo(os.path.join(EVIDENCE_DIR, event["image"]), meta)
 
 
+# ---------------------- errores ----------------------
+
+@app.exception_handler(psycopg2.OperationalError)
+@app.exception_handler(psycopg2.pool.PoolError)
+async def _base_no_disponible(request: Request, exc):
+    # La base está apagada o reiniciándose: se avisa con claridad y la app se recupera sola.
+    log.error("Base de datos no disponible: %s", exc)
+    return JSONResponse(status_code=503,
+                        content={"error": "El servicio no está disponible. Inténtalo en unos minutos."})
+
+
+@app.exception_handler(CommunityNotConfigured)
+async def _comunidad_no_configurada(request: Request, exc):
+    log.error("%s", exc)
+    return JSONResponse(status_code=503, content={"error": str(exc)})
+
+
+# ---------------------- API ----------------------
+
+@app.middleware("http")
+async def limitar_subidas(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/analyze" and upload_too_big(request):
+        return JSONResponse(status_code=413,
+                            content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
+    return await call_next(request)
+
+
+@app.on_event("startup")
+def startup():
+    log.warning("Backend GUARDIAN iniciado. Preparando actuador y notificador...")
+    restos = clean_leftovers()
+    if restos:
+        log.warning("Se borraron %d video(s) que quedaron a medias de un análisis anterior.", restos)
+    db.dsn()   # si falta DATABASE_URL, el arranque se detiene con un mensaje claro
+    try:
+        db.check()
+        get_community_id()
+        log.warning("Conexión a PostgreSQL correcta (comunidad «%s»).", COMMUNITY_SLUG)
+    except (psycopg2.OperationalError, CommunityNotConfigured) as ex:
+        # La base puede arrancar después: se reintenta en cada petición.
+        log.error("Todavía no se puede usar la base de datos: %s", ex)
+    get_dispatcher()
+
+
+@app.get("/health")
+def health():
+    try:
+        db.check()
+        return {"status": "ok", "db": "ok"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "degradado", "db": "error"})
+
+
+# ---------------------- CÁMARA EN VIVO ----------------------
+
 def _process_frame(session, data):
     frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         return None
     out = session.process(frame)
     if out["event"]:
-        insert_event(out["event"])
+        insert_event(out["event"], source_kind="browser")
         dispatch_live_alert(out["event"])
     return out
 
@@ -203,7 +333,14 @@ def _process_frame(session, data):
 async def ws_live(ws: WebSocket):
     """El navegador manda frames JPEG (binario); responde JSON con cajas y nivel."""
     await ws.accept()
-    session = get_engine().new_session(EVIDENCE_DIR)
+    try:
+        await asyncio.to_thread(get_community_id)
+    except (CommunityNotConfigured, psycopg2.OperationalError) as ex:
+        log.error("Cámara en vivo rechazada: %s", ex)
+        await ws.close(code=1013)           # intenta más tarde
+        return
+    engine = await asyncio.to_thread(get_engine)
+    session = engine.new_session(EVIDENCE_DIR)
     log.info("Cámara en vivo conectada.")
     try:
         while True:
@@ -218,42 +355,57 @@ async def ws_live(ws: WebSocket):
 
 @app.post("/analyze")
 async def analyze(video: UploadFile = File(...)):
-    """Sube un video, lo analiza y guarda los eventos encontrados."""
-    safe = os.path.basename(video.filename).replace(" ", "_")
-    dst = os.path.join(UPLOAD_DIR, safe)
-    with open(dst, "wb") as f:
-        shutil.copyfileobj(video.file, f)
+    """
+    Analiza un video y guarda los EVENTOS encontrados. El video no se conserva: se copia a un
+    archivo temporal con nombre único (el motor lo abre por ruta), se analiza, y se borra siempre.
+    """
+    label = os.path.basename(video.filename or "video").replace(" ", "_")
+    extension = re.sub(r"[^A-Za-z0-9.]", "", os.path.splitext(label)[1])[:8] or ".mp4"
+    fd, tmp_path = tempfile.mkstemp(prefix=TMP_PREFIX, suffix=extension, dir=UPLOAD_DIR)
     try:
-        events = get_engine().analyze_video(dst, EVIDENCE_DIR, source_label=safe)
-    except Exception as ex:
-        return JSONResponse(status_code=500, content={"error": str(ex)})
-    for e in events:
-        insert_event(e)
-    dispatch_alerts(events, safe)
-    return {"archivo": safe, "eventos_detectados": len(events), "eventos": events}
+        recibidos = 0
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                trozo = await video.read(1024 * 1024)
+                if not trozo:
+                    break
+                recibidos += len(trozo)
+                if recibidos > MAX_UPLOAD_MB * 1024 * 1024:
+                    return JSONResponse(status_code=413,
+                                        content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
+                out.write(trozo)
+        try:
+            events = get_engine().analyze_video(tmp_path, EVIDENCE_DIR, source_label=label)
+        except Exception as ex:
+            return JSONResponse(status_code=500, content={"error": str(ex)})
+        for e in events:
+            insert_event(e, source_kind="video")
+        dispatch_alerts(events, label)
+        return {"archivo": label, "eventos_detectados": len(events), "eventos": events}
+    finally:
+        try:
+            os.remove(tmp_path)          # el video nunca se queda en el servidor
+        except OSError:
+            pass
 
 
 @app.post("/ingest")
 async def ingest(request: Request):
-    """Recibe un evento del detector en vivo (JSON) y lo guarda."""
+    """Recibe un evento de otro equipo (por ejemplo, el detector) y lo guarda."""
     e = await request.json()
-    insert_event({
-        "source": e.get("zone", "en vivo"),
-        "video_time_s": None,
+    await asyncio.to_thread(insert_event, {
         "level": e.get("level"),
         "score": e.get("score"),
-        "reasons": ", ".join(e.get("reasons", [])) if isinstance(e.get("reasons"), list) else e.get("reasons"),
-        "image": os.path.basename(e["image"]) if e.get("image") else None,
+        "reasons": e.get("reasons"),
+        "image": e.get("image"),
         "people": e.get("people"),
-    })
+    }, "edge")
     return {"ok": True}
 
 
 @app.get("/events")
 def events(limit: int = 100):
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+    return list_events(limit)
 
 
 @app.get("/evidence/{name}")
@@ -266,26 +418,26 @@ def evidence(name: str):
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 50").fetchall()
+    rows = list_events(50)
     cards = ""
     for r in rows:
         color = {"ALTO": "#e74c3c", "MEDIO": "#f39c12", "BAJO": "#2ecc71"}.get(r["level"], "#888")
-        img = f'<img src="/evidence/{r["image"]}" style="width:100%;border-radius:8px">' if r["image"] else ""
-        vt = f'{r["video_time_s"]}s' if r["video_time_s"] is not None else "en vivo"
+        img = (f'<img src="/evidence/{html.escape(r["image"])}" style="width:100%;border-radius:8px">'
+               if r["image"] else "")
+        vt = f'{r["video_time_s"]:g}s' if r["video_time_s"] is not None else "en vivo"
+        origen = SOURCE_LABELS.get(r["source"], r["source"])
         cards += f"""
         <div style="border:1px solid #ddd;border-radius:10px;padding:10px;background:#fff">
           {img}
           <div style="margin-top:8px">
-            <span style="background:{color};color:#fff;padding:2px 8px;border-radius:6px;font-weight:bold">{r["level"]}</span>
+            <span style="background:{color};color:#fff;padding:2px 8px;border-radius:6px;font-weight:bold">{html.escape(r["level"])}</span>
             <span style="color:#666"> puntaje {r["score"]}</span>
           </div>
-          <div style="font-size:14px;margin-top:6px">{r["reasons"] or ""}</div>
-          <div style="font-size:12px;color:#888;margin-top:6px">{r["source"]} · {vt} · {r["created_at"]}</div>
+          <div style="font-size:14px;margin-top:6px">{html.escape(r["reasons"] or "")}</div>
+          <div style="font-size:12px;color:#888;margin-top:6px">{html.escape(origen)} · {vt} · {r["created_at"]}</div>
         </div>"""
     if not cards:
         cards = '<p style="color:#888">Aun no hay eventos. Inicia la cámara para monitorear.</p>'
-    tpl_path = os.path.join(BASE, "backend", "templates", "index.html")
-    with open(tpl_path, encoding="utf-8") as fh:
+    with open(os.path.join(TEMPLATES_DIR, "index.html"), encoding="utf-8") as fh:
         template = fh.read()
-    return template.replace("{cards}", cards)
+    return HTMLResponse(template.replace("{cards}", cards), headers={"Cache-Control": "no-store"})

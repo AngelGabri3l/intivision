@@ -1,13 +1,3 @@
-"""
-actuator.py — Dispara la sirena/LED.
-
-  LogActuator  : modo simulado (solo imprime en consola).
-  MQTTActuator : publica la orden en un broker MQTT; el ESP32 (real o Wokwi) la recibe.
-
-Cada orden enviada se registra en la consola (visible con `docker compose logs -f`)
-junto con la confirmación del broker, para poder verificar que la alerta salió.
-Órdenes: "ON:<seg>" (nivel ALTO, sirena), "WARN" (nivel MEDIO, LED), "OFF".
-"""
 import logging
 import datetime
 
