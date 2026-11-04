@@ -7,18 +7,21 @@ import tempfile
 import logging
 import datetime
 import html
+import secrets
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
 import psycopg2
 import psycopg2.pool
-from fastapi import FastAPI, UploadFile, File, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi import (FastAPI, UploadFile, File, Request, WebSocket,
+                     WebSocketDisconnect, Depends, Form)
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db  # noqa: E402
+from backend import db, auth  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE, "backend", "data")
@@ -26,7 +29,6 @@ UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 EVIDENCE_DIR = os.path.join(BASE, "events")  # compartido con el detector
 CONFIG_PATH = os.path.join(BASE, "config.yaml")
 TEMPLATES_DIR = os.path.join(BASE, "backend", "templates")
-COMMUNITY_SLUG = os.environ.get("COMMUNITY_SLUG", "").strip()
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))   # igual que el límite de la página
 TMP_PREFIX = "vigia_upload_"                                    # nombre de los videos en análisis
 
@@ -37,10 +39,12 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("backend")
 
-app = FastAPI(title="GUARDIAN Backend")
+# /docs, /redoc y /openapi.json mostrarían todo el mapa de la API a cualquiera: apagados salvo ENABLE_DOCS=1.
+_docs = os.environ.get("ENABLE_DOCS") == "1"
+app = FastAPI(title="GUARDIAN Backend", docs_url="/docs" if _docs else None,
+              redoc_url="/redoc" if _docs else None, openapi_url="/openapi.json" if _docs else None)
 _engine = None       # se crea en el primer análisis (carga modelos; puede tardar)
 _dispatcher = None   # actuador (MQTT) + notificador (Telegram), creado una vez
-_community_id = None
 
 
 def load_cfg():
@@ -57,7 +61,112 @@ def get_engine():
     return _engine
 
 
-# ---------------------- videos subidos (temporales) ----------------------
+# ---------------------- seguridad: utilidades ----------------------
+
+MENSAJE_ACCESO = "Usuario o contraseña incorrectos."      # el MISMO texto para todo fallo: no revela qué cuentas existen
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+MAX_LABEL_CHARS = 80
+NIVELES = ("BAJO", "MEDIO", "ALTO")
+IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def fill(template, **values):
+    """
+    Sustituye {nombre} en UNA sola pasada. Lo que se inserta no se vuelve a interpretar: si un usuario
+    se llamara «{cards}» o escribiera «{error}» en el login, no podría colar contenido en la página.
+    """
+    patron = r"\{(" + "|".join(re.escape(k) for k in values) + r")\}"
+    return re.sub(patron, lambda m: values[m.group(1)], template)
+
+
+def clean_filename(name):
+    """Nombre seguro a partir del que manda el navegador: sin carpetas, sin símbolos raros, de largo acotado."""
+    base = os.path.basename((name or "video").replace("\\", "/")).replace(" ", "_")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    base = re.sub(r"\.{2,}", ".", base).strip("._-") or "video"
+    return base[-MAX_LABEL_CHARS:]                          # se conserva el final para no perder la extensión
+
+
+def validate_event(e):
+    """Revisa un evento recibido de otro equipo. Devuelve (evento_limpio, None) o (None, motivo)."""
+    if not isinstance(e, dict):
+        return None, "El cuerpo debe ser un objeto JSON."
+    if e.get("level") not in NIVELES:
+        return None, "level debe ser BAJO, MEDIO o ALTO."
+    out = {"level": e["level"]}
+    for campo, tope in (("score", 100), ("people", 1000)):
+        valor = e.get(campo, 0)
+        if isinstance(valor, bool) or not isinstance(valor, int) or not 0 <= valor <= tope:
+            return None, f"{campo} debe ser un entero entre 0 y {tope}."
+        out[campo] = valor
+    motivos = e.get("reasons")
+    if isinstance(motivos, list):
+        if not all(isinstance(x, str) for x in motivos):
+            return None, "reasons debe ser texto o una lista de textos."
+        motivos = ", ".join(motivos)
+    if motivos is not None and (not isinstance(motivos, str) or len(motivos) > 500):
+        return None, "reasons debe ser texto de hasta 500 caracteres."
+    out["reasons"] = motivos
+    imagen = e.get("image")
+    if imagen is not None and (not isinstance(imagen, str) or not IMAGE_NAME_RE.match(imagen)):
+        return None, "image debe ser un nombre de archivo simple (letras, números, punto, guion)."
+    out["image"] = imagen
+    return out, None
+
+
+def content_security_policy(nonce):
+    """Política del navegador: solo el script de la página (con su clave de un solo uso), nada de terceros."""
+    return "; ".join([
+        "default-src 'none'",
+        f"script-src 'nonce-{nonce}'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        "connect-src 'self'",
+        "form-action 'self'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+    ])
+
+
+def cross_site_request(request: Request) -> bool:
+    """
+    ¿Es una petición que CAMBIA algo y viene de otra página? Los navegadores mandan Origin en los envíos de
+    formularios; si no coincide con este sitio, se bloquea (CSRF). Las mini PC no son navegadores: no mandan
+    Origin y se identifican con su token, así que no les afecta.
+    """
+    if request.method not in UNSAFE_METHODS:
+        return False
+    origin = request.headers.get("origin")
+    if origin is not None:
+        permitidos = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+        return not (urlparse(origin).netloc == request.headers.get("host") or origin in permitidos)
+    sitio = request.headers.get("sec-fetch-site")
+    return sitio is not None and sitio not in ("same-origin", "none")
+
+
+def apply_security_headers(request: Request, response):
+    h = response.headers
+    h["X-Content-Type-Options"] = "nosniff"
+    h["X-Frame-Options"] = "DENY"
+    h["Referrer-Policy"] = "same-origin"
+    h["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
+    h["Cross-Origin-Opener-Policy"] = "same-origin"
+    h["Cross-Origin-Resource-Policy"] = "same-origin"
+    # Las fotos pueden guardarse un rato en el navegador de su dueño; todo lo demás, nunca.
+    h["Cache-Control"] = "private, max-age=600" if request.url.path.startswith("/evidence/") else "no-store"
+    if auth.cookie_is_secure(request):
+        h["Strict-Transport-Security"] = "max-age=31536000"
+    if h.get("content-type", "").startswith("text/html"):
+        h["Content-Security-Policy"] = content_security_policy(request.state.csp_nonce)
+    else:
+        h["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+
+
+# ---------------------- videos subidos (temporales) ----------------------# ---------------------- videos subidos (temporales) ----------------------
 
 def clean_leftovers():
     """Si el servidor se cayó en pleno análisis, quedan videos a medias: se borran al arrancar."""
@@ -79,29 +188,6 @@ def upload_too_big(request: Request) -> bool:
     except ValueError:
         return False
     return declarado > (MAX_UPLOAD_MB + 1) * 1024 * 1024          # +1 MB de margen de la cabecera
-
-
-# ---------------------- comunidad ----------------------
-
-class CommunityNotConfigured(Exception):
-    """COMMUNITY_SLUG falta o la comunidad no existe en la base."""
-
-
-def get_community_id():
-    """Id de la comunidad donde se guardan los eventos (se busca una vez y se recuerda)."""
-    global _community_id
-    if _community_id is None:
-        if not COMMUNITY_SLUG:
-            raise CommunityNotConfigured("Falta la variable de entorno COMMUNITY_SLUG.")
-        with db.cursor() as cur:
-            cur.execute("SELECT id FROM communities WHERE slug = %s", (COMMUNITY_SLUG,))
-            row = cur.fetchone()
-        if row is None:
-            raise CommunityNotConfigured(
-                f"No existe la comunidad «{COMMUNITY_SLUG}». Créala con: python -m backend.manage "
-                f"create-community --name ... --slug {COMMUNITY_SLUG} --district-ubigeo ... --district-name ...")
-        _community_id = row["id"]
-    return _community_id
 
 
 # ---------------------- eventos en PostgreSQL ----------------------
@@ -137,16 +223,20 @@ def parse_reasons(reasons):
     return out
 
 
-def insert_event(e, source_kind="browser", community_id=None, camera_id=None):
-    """Guarda un evento con sus motivos (event_signals) y su imagen (media_files)."""
-    community = community_id or get_community_id()
+def insert_event(e, user=None, community_id=None, source_kind="browser", camera_id=None):
+    """
+    Guarda un evento con sus motivos (event_signals) y su imagen (media_files). Si viene `user`,
+    el evento es de ese usuario y de su comunidad; si no (mini PC), solo de la comunidad.
+    """
+    owner = user["id"] if user else None
+    community = user["community_id"] if user else community_id
     image = os.path.basename(e["image"]) if e.get("image") else None
     with db.cursor() as cur:
         cur.execute(
-            """INSERT INTO events (community_id, camera_id, source, level, score, people_count,
-                                   status, video_time_s, occurred_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now()) RETURNING id""",
-            (community, camera_id, source_kind, e.get("level"), int(e.get("score") or 0),
+            """INSERT INTO events (community_id, user_id, camera_id, source, level, score,
+                                   people_count, status, video_time_s, occurred_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, now()) RETURNING id""",
+            (community, owner, camera_id, source_kind, e.get("level"), int(e.get("score") or 0),
              int(e.get("people") or 0), e.get("status", "sin verificar"), e.get("video_time_s")))
         event_id = cur.fetchone()["id"]
         for code, detail in parse_reasons(e.get("reasons")):
@@ -158,30 +248,37 @@ def insert_event(e, source_kind="browser", community_id=None, camera_id=None):
             except OSError:
                 size = 0
             cur.execute(
-                """INSERT INTO media_files (community_id, camera_id, event_id, kind, storage_key, size_bytes)
-                   VALUES (%s,%s,%s,'image',%s,%s) ON CONFLICT (storage_key) DO NOTHING""",
-                (community, camera_id, event_id, image, size))
+                """INSERT INTO media_files (community_id, user_id, camera_id, event_id, kind,
+                                            storage_key, size_bytes)
+                   VALUES (%s,%s,%s,%s,'image',%s,%s) ON CONFLICT (storage_key) DO NOTHING""",
+                (community, owner, camera_id, event_id, image, size))
     return event_id
 
 
-def list_events(limit=100):
-    """Los eventos más recientes de la comunidad, con motivos e imagen."""
+def list_events(user, limit=100):
+    """Residente: sus eventos. Administrador: los de su comunidad (salvo cámaras que no comparte)."""
     limit = max(1, min(int(limit), 500))
+    base = """
+        SELECT e.id,
+               to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+               e.source, e.video_time_s, e.level, e.score,
+               COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
+                         FROM event_signals es JOIN signals s ON s.code = es.signal_code
+                         WHERE es.event_id = e.id), '') AS reasons,
+               (SELECT m.storage_key FROM media_files m
+                 WHERE m.event_id = e.id AND m.kind = 'image'
+                 ORDER BY m.created_at LIMIT 1) AS image,
+               e.people_count AS people, e.status
+        FROM events e LEFT JOIN cameras c ON c.id = e.camera_id
+        WHERE """
+    if user["role"] == "community_admin":
+        sql = base + "e.community_id = %s AND (c.id IS NULL OR c.admin_can_view) ORDER BY e.id DESC LIMIT %s"
+        args = (user["community_id"], limit)
+    else:
+        sql = base + "e.user_id = %s ORDER BY e.id DESC LIMIT %s"
+        args = (user["id"], limit)
     with db.cursor() as cur:
-        cur.execute(
-            """SELECT e.id,
-                      to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
-                      e.source, e.video_time_s, e.level, e.score,
-                      COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
-                                FROM event_signals es JOIN signals s ON s.code = es.signal_code
-                                WHERE es.event_id = e.id), '') AS reasons,
-                      (SELECT m.storage_key FROM media_files m
-                        WHERE m.event_id = e.id AND m.kind = 'image'
-                        ORDER BY m.created_at LIMIT 1) AS image,
-                      e.people_count AS people, e.status
-               FROM events e
-               WHERE e.community_id = %s
-               ORDER BY e.id DESC LIMIT %s""", (get_community_id(), limit))
+        cur.execute(sql, args)
         rows = cur.fetchall()
     for r in rows:
         if r["video_time_s"] is not None:
@@ -274,20 +371,109 @@ async def _base_no_disponible(request: Request, exc):
                         content={"error": "El servicio no está disponible. Inténtalo en unos minutos."})
 
 
-@app.exception_handler(CommunityNotConfigured)
-async def _comunidad_no_configurada(request: Request, exc):
-    log.error("%s", exc)
-    return JSONResponse(status_code=503, content={"error": str(exc)})
+@app.exception_handler(auth.NotAuthenticated)
+async def _no_autenticado(request: Request, exc):
+    # La página principal lleva al login; la API responde 401 (la página lo interpreta).
+    quiere_html = (request.method == "GET" and request.url.path == "/"
+                   and "text/html" in request.headers.get("accept", ""))
+    if quiere_html:
+        return RedirectResponse("/login", status_code=303)
+    return JSONResponse(status_code=401, content={"error": "No has iniciado sesión."})
+
+
+@app.exception_handler(auth.Forbidden)
+async def _sin_permiso(request: Request, exc):
+    return JSONResponse(status_code=403, content={"error": "No tienes permiso para esto."})
+
+
+# ---------------------- inicio y cierre de sesión ----------------------
+
+def render_login(message=None, status_code=200, tipo="error", identifier=""):
+    with open(os.path.join(TEMPLATES_DIR, "login.html"), encoding="utf-8") as fh:
+        template = fh.read()
+    bloque = ""
+    if message:
+        etiqueta = "Aviso" if tipo == "alerta" else "Error"
+        bloque = (f'<p class="estado" data-tipo="{tipo}" role="alert"><span class="estado__tag">{etiqueta}</span>'
+                  f'<span>{html.escape(message)}</span></p>')
+    # Lo que escribió el usuario se devuelve escapado y sin caracteres de control.
+    visible = "".join(ch for ch in (identifier or "") if ch.isprintable())[:auth.MAX_IDENTIFIER_CHARS]
+    return HTMLResponse(fill(template, error=bloque, identifier=html.escape(visible, quote=True)),
+                        status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    try:
+        ya_inicio = auth.user_from_token(request.cookies.get(auth.SESSION_COOKIE))
+    except psycopg2.OperationalError:
+        ya_inicio = None        # sin base no se puede comprobar; igual se muestra el formulario
+    if ya_inicio:
+        return RedirectResponse("/", status_code=303)
+    return render_login()
+
+
+@app.post("/login")
+def login_submit(request: Request, identifier: str = Form(""), password: str = Form("")):
+    ip = auth.client_ip(request)
+    if auth.throttled(ip):
+        log.warning("Demasiados accesos fallidos desde %s: se le pide esperar.", ip)
+        return render_login("Demasiados intentos desde esta conexión. Espera unos minutos e inténtalo de nuevo.",
+                            429, "alerta", identifier)
+    try:
+        user, motivo = auth.authenticate(identifier, password)
+    except psycopg2.OperationalError:
+        return render_login("El servicio no está disponible. Inténtalo en unos minutos.", 503, "error", identifier)
+    if motivo:
+        auth.register_failure(ip)
+        # Mismo mensaje y mismo código para "no existe", "clave mala" y "cuenta bloqueada": así nadie
+        # puede averiguar qué cuentas existen probando nombres.
+        log.warning("Acceso fallido desde %s (%s).", ip, "cuenta bloqueada" if motivo == "locked" else "credenciales")
+        return render_login(MENSAJE_ACCESO, 401, "error", identifier)
+    token = auth.create_session(user["id"], ip, request.headers.get("user-agent"))
+    log.info("Inicio de sesión de %s desde %s.", user["id"], ip)
+    response = RedirectResponse("/", status_code=303)
+    auth.set_session_cookie(response, request, token)
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request):
+    auth.revoke_session(request.cookies.get(auth.SESSION_COOKIE))
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return response
 
 
 # ---------------------- API ----------------------
 
 @app.middleware("http")
 async def limitar_subidas(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/analyze" and upload_too_big(request):
-        return JSONResponse(status_code=413,
-                            content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
+    if request.method == "POST" and request.url.path == "/analyze":
+        # Se decide ANTES de recibir el video: sin sesión no se acepta ni un byte, y si es enorme tampoco.
+        try:
+            user = await asyncio.to_thread(auth.user_from_token, request.cookies.get(auth.SESSION_COOKIE))
+        except (psycopg2.OperationalError, psycopg2.pool.PoolError):
+            return JSONResponse(status_code=503,
+                                content={"error": "El servicio no está disponible. Inténtalo en unos minutos."})
+        if user is None:
+            return JSONResponse(status_code=401, content={"error": "No has iniciado sesión."})
+        if upload_too_big(request):
+            return JSONResponse(status_code=413,
+                                content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def seguridad(request: Request, call_next):
+    request.state.csp_nonce = secrets.token_urlsafe(16)        # clave de un solo uso para el script de cada página
+    if cross_site_request(request):
+        log.warning("Petición %s %s bloqueada: viene de otro sitio.", request.method, request.url.path)
+        response = JSONResponse(status_code=403, content={"error": "Petición bloqueada: viene de otro sitio."})
+    else:
+        response = await call_next(request)
+    apply_security_headers(request, response)
+    return response
 
 
 @app.on_event("startup")
@@ -299,9 +485,8 @@ def startup():
     db.dsn()   # si falta DATABASE_URL, el arranque se detiene con un mensaje claro
     try:
         db.check()
-        get_community_id()
-        log.warning("Conexión a PostgreSQL correcta (comunidad «%s»).", COMMUNITY_SLUG)
-    except (psycopg2.OperationalError, CommunityNotConfigured) as ex:
+        log.warning("Conexión a PostgreSQL correcta.")
+    except psycopg2.OperationalError as ex:
         # La base puede arrancar después: se reintenta en cada petición.
         log.error("Todavía no se puede usar la base de datos: %s", ex)
     get_dispatcher()
@@ -318,13 +503,13 @@ def health():
 
 # ---------------------- CÁMARA EN VIVO ----------------------
 
-def _process_frame(session, data):
+def _process_frame(session, data, user):
     frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         return None
     out = session.process(frame)
     if out["event"]:
-        insert_event(out["event"], source_kind="browser")
+        insert_event(out["event"], user=user, source_kind="browser")
         dispatch_live_alert(out["event"])
     return out
 
@@ -333,20 +518,25 @@ def _process_frame(session, data):
 async def ws_live(ws: WebSocket):
     """El navegador manda frames JPEG (binario); responde JSON con cajas y nivel."""
     await ws.accept()
+    if not auth.origin_allowed(ws):
+        await ws.close(code=4403)           # otro sitio intentó abrir la cámara
+        return
     try:
-        await asyncio.to_thread(get_community_id)
-    except (CommunityNotConfigured, psycopg2.OperationalError) as ex:
-        log.error("Cámara en vivo rechazada: %s", ex)
-        await ws.close(code=1013)           # intenta más tarde
+        user = await asyncio.to_thread(auth.user_from_websocket, ws)
+    except (psycopg2.OperationalError, psycopg2.pool.PoolError):
+        await ws.close(code=1013)           # base no disponible: intenta más tarde
+        return
+    if user is None:
+        await ws.close(code=4401)           # sin sesión o sesión vencida
         return
     engine = await asyncio.to_thread(get_engine)
     session = engine.new_session(EVIDENCE_DIR)
-    log.info("Cámara en vivo conectada.")
+    log.info("Cámara en vivo conectada (usuario %s).", user["id"])
     try:
         while True:
             data = await ws.receive_bytes()
             # La inferencia es bloqueante: se ejecuta en un hilo para no frenar el servidor.
-            out = await asyncio.to_thread(_process_frame, session, data)
+            out = await asyncio.to_thread(_process_frame, session, data, user)
             if out is not None:
                 await ws.send_json(out)
     except WebSocketDisconnect:
@@ -354,13 +544,15 @@ async def ws_live(ws: WebSocket):
 
 
 @app.post("/analyze")
-async def analyze(video: UploadFile = File(...)):
+async def analyze(video: UploadFile = File(...), user: dict = Depends(auth.current_user)):
     """
     Analiza un video y guarda los EVENTOS encontrados. El video no se conserva: se copia a un
     archivo temporal con nombre único (el motor lo abre por ruta), se analiza, y se borra siempre.
     """
-    label = os.path.basename(video.filename or "video").replace(" ", "_")
-    extension = re.sub(r"[^A-Za-z0-9.]", "", os.path.splitext(label)[1])[:8] or ".mp4"
+    label = clean_filename(video.filename)
+    extension = os.path.splitext(label)[1].lower()
+    if extension not in VIDEO_EXTENSIONS:
+        return JSONResponse(status_code=415, content={"error": "Formato no permitido. Usa MP4, MOV, AVI, MKV o WEBM."})
     fd, tmp_path = tempfile.mkstemp(prefix=TMP_PREFIX, suffix=extension, dir=UPLOAD_DIR)
     try:
         recibidos = 0
@@ -376,10 +568,11 @@ async def analyze(video: UploadFile = File(...)):
                 out.write(trozo)
         try:
             events = get_engine().analyze_video(tmp_path, EVIDENCE_DIR, source_label=label)
-        except Exception as ex:
-            return JSONResponse(status_code=500, content={"error": str(ex)})
+        except Exception:
+            log.exception("Falló el análisis del video %s", label)       # el detalle queda en el registro, no en la respuesta
+            return JSONResponse(status_code=500, content={"error": "No se pudo analizar el video. Prueba con otro archivo."})
         for e in events:
-            insert_event(e, source_kind="video")
+            insert_event(e, user=user, source_kind="video")
         dispatch_alerts(events, label)
         return {"archivo": label, "eventos_detectados": len(events), "eventos": events}
     finally:
@@ -391,34 +584,66 @@ async def analyze(video: UploadFile = File(...)):
 
 @app.post("/ingest")
 async def ingest(request: Request):
-    """Recibe un evento de otro equipo (por ejemplo, el detector) y lo guarda."""
-    e = await request.json()
-    await asyncio.to_thread(insert_event, {
-        "level": e.get("level"),
-        "score": e.get("score"),
-        "reasons": e.get("reasons"),
-        "image": e.get("image"),
-        "people": e.get("people"),
-    }, "edge")
+    """Recibe un evento de una mini PC. Se identifica con 'Authorization: Bearer <token>'."""
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else None
+    edge = await asyncio.to_thread(auth.edge_from_token, token)
+    if edge is None:
+        return JSONResponse(status_code=401, content={"error": "Token de la mini PC inválido."})
+    try:
+        if int(request.headers.get("content-length", "0")) > 100_000:
+            return JSONResponse(status_code=413, content={"error": "El evento es demasiado grande."})
+    except ValueError:
+        pass
+    try:
+        e = await request.json()
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
+    limpio, motivo = validate_event(e)
+    if motivo:
+        return JSONResponse(status_code=422, content={"error": motivo})
+    await asyncio.to_thread(insert_event, limpio, None, edge["community_id"], "edge")
     return {"ok": True}
 
 
 @app.get("/events")
-def events(limit: int = 100):
-    return list_events(limit)
+def events(limit: int = 100, user: dict = Depends(auth.current_user)):
+    return list_events(user, limit)
 
 
 @app.get("/evidence/{name}")
-def evidence(name: str):
-    path = os.path.join(EVIDENCE_DIR, os.path.basename(name))
-    if not os.path.exists(path):
-        return JSONResponse(status_code=404, content={"error": "no encontrado"})
+def evidence(name: str, request: Request, user: dict = Depends(auth.current_user)):
+    """Entrega una imagen solo a su dueño o al administrador de su comunidad."""
+    if not IMAGE_NAME_RE.match(name):
+        return JSONResponse(status_code=404, content={"error": "no encontrado"})   # nombres raros ni se buscan
+    safe = name
+    with db.cursor() as cur:
+        if user["role"] == "community_admin":
+            cur.execute(
+                """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
+                   WHERE m.storage_key = %s AND m.community_id = %s
+                     AND (c.id IS NULL OR c.admin_can_view)""", (safe, user["community_id"]))
+        else:
+            cur.execute("SELECT user_id FROM media_files WHERE storage_key = %s AND user_id = %s",
+                        (safe, user["id"]))
+        row = cur.fetchone()
+        path = os.path.join(EVIDENCE_DIR, safe)
+        if row is None or not os.path.exists(path):
+            return JSONResponse(status_code=404, content={"error": "no encontrado"})
+        if user["role"] == "community_admin" and row["user_id"] != user["id"]:
+            # Queda registro de que el administrador abrió una imagen de otra persona.
+            cur.execute(
+                """INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id,
+                                          action, entity, entity_id, ip)
+                   VALUES ('user', %s, %s, %s, 'view_evidence', 'media_file', %s, %s)""",
+                (user["id"], user["community_id"], row["user_id"], safe,
+                 auth._clean_ip(request.client.host if request.client else None)))
     return FileResponse(path)
 
 
 @app.get("/", response_class=HTMLResponse)
-def home():
-    rows = list_events(50)
+def home(request: Request, user: dict = Depends(auth.current_user)):
+    rows = list_events(user, 50)
     cards = ""
     for r in rows:
         color = {"ALTO": "#e74c3c", "MEDIO": "#f39c12", "BAJO": "#2ecc71"}.get(r["level"], "#888")
@@ -440,4 +665,8 @@ def home():
         cards = '<p style="color:#888">Aun no hay eventos. Inicia la cámara para monitorear.</p>'
     with open(os.path.join(TEMPLATES_DIR, "index.html"), encoding="utf-8") as fh:
         template = fh.read()
-    return HTMLResponse(template.replace("{cards}", cards), headers={"Cache-Control": "no-store"})
+    rol = "Administrador" if user["role"] == "community_admin" else "Residente"
+    return HTMLResponse(
+        fill(template, usuario=f'{html.escape(user["full_name"])} · {rol}', cards=cards,
+             nonce=request.state.csp_nonce),
+        headers={"Cache-Control": "no-store"})

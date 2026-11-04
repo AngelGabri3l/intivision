@@ -111,6 +111,10 @@ button, input { font: inherit; color: inherit; }
   font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; text-decoration: none; white-space: nowrap;
 }
 .volver:hover { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+button.volver { background: none; cursor: pointer; font-family: inherit; }
+.cabecera__nav { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.cabecera__nav form { margin: 0; }
+.usuario { color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
@@ -273,7 +277,9 @@ button, input { font: inherit; color: inherit; }
       <span class="marca__modulo">Guardian</span>
       <span class="marca__detalle">Módulo de análisis</span>
     </div>
-    <nav aria-label="Principal">
+    <nav aria-label="Principal" class="cabecera__nav">
+      <span class="usuario" id="usuario">{usuario}</span>
+      <form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>
       <a class="volver" id="enlace-landing" href="https://v0-vigia.vercel.app/">&larr; Volver a VIGÍA</a>
     </nav>
   </div>
@@ -366,7 +372,7 @@ button, input { font: inherit; color: inherit; }
   <div class="contenedor">VIGÍA © 2026 · GUARDIAN · Prototipo</div>
 </footer>
 
-<script>
+<script nonce="{nonce}">
 (() => {
   'use strict';
 
@@ -497,6 +503,7 @@ button, input { font: inherit; color: inherit; }
       const datos = new FormData();
       datos.append('video', archivo);
       const respuesta = await fetch('/analyze', { method: 'POST', body: datos });
+      if (respuesta.status === 401) { window.location.href = '/login'; return; }
       let cuerpo = null;
       try { cuerpo = await respuesta.json(); } catch (_) { /* respuesta sin JSON */ }
       if (!respuesta.ok || (cuerpo && cuerpo.error)) {
@@ -608,6 +615,9 @@ button, input { font: inherit; color: inherit; }
   }
   async function actualizarEventos() {
     const respuesta = await fetch('/', { headers: { Accept: 'text/html' }, cache: 'no-store' });
+    if (respuesta.status === 401 || (respuesta.redirected && new URL(respuesta.url).pathname === '/login')) {
+      window.location.href = '/login'; return;
+    }
     if (!respuesta.ok) throw new Error('GET / ' + respuesta.status);
     const documento = new DOMParser().parseFromString(await respuesta.text(), 'text/html');
     const nuevo = documento.getElementById('eventos');
@@ -713,9 +723,11 @@ button, input { font: inherit; color: inherit; }
       if (r) pintar(r);
       if (enVivo) setTimeout(enviarFotograma, 30);
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       const estabaConectada = enVivo;
       detenerCamara();
+      if (ev && ev.code === 4401) { window.location.href = '/login'; return; }
+      if (ev && ev.code === 4403) { mostrarEstado('error', 'Conexión rechazada: el origen de la página no está permitido.', estadoCam); return; }
       mostrarEstado('error', estabaConectada ? 'Se perdió la conexión con el servidor.' : 'No se pudo conectar con el servidor de análisis.', estadoCam);
     };
   }

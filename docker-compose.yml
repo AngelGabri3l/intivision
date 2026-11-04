@@ -11,7 +11,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=${DATABASE_URL:?Define DATABASE_URL en el archivo .env}
-      - COMMUNITY_SLUG=${COMMUNITY_SLUG:?Define COMMUNITY_SLUG en el archivo .env}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - MQTT_USERNAME=${MQTT_USERNAME:-}

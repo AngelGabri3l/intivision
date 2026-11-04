@@ -1,18 +1,26 @@
 """
-test_ingest.py — Prueba del endpoint /ingest del backend.
+test_ingest.py — Prueba manual del endpoint /ingest del backend.
 
-Simula un evento del detector en vivo y lo envia al backend, para verificar que
-queda guardado y aparece en el panel junto a los eventos de video.
+Desde VIGIA-23, /ingest exige el token de la mini PC (cada equipo tiene el suyo). Para crearlo:
 
-Uso (con el backend corriendo en localhost:8000):
-    python backend/test_ingest.py
+    docker compose exec backend python -m backend.manage create-edge-device \
+        --community-slug cuadra-01 --name mini-cuadra-01
+
+Uso (con el backend corriendo):
+    EDGE_TOKEN=<token> BACKEND=https://intivision.online python backend/test_ingest.py
+
+El evento queda en la comunidad de esa mini PC, como cámara de zona común: lo ve el
+administrador de la comunidad, no los residentes.
 """
+import os
+import sys
+
 import requests
 
-BACKEND = "http://localhost:8000"
+BACKEND = os.environ.get("BACKEND", "http://localhost:8000")
+TOKEN = os.environ.get("EDGE_TOKEN")
 
 evento = {
-    "zone": "Cuadra 01 - Piloto",
     "level": "ALTO",
     "score": 6,
     "reasons": ["persona detectada", "en zona restringida", "horario sensible"],
@@ -20,9 +28,8 @@ evento = {
 }
 
 if __name__ == "__main__":
-    r = requests.post(f"{BACKEND}/ingest", json=evento, timeout=10)
+    if not TOKEN:
+        sys.exit("Define EDGE_TOKEN con el token de la mini PC (ver el encabezado de este archivo).")
+    r = requests.post(f"{BACKEND}/ingest", json=evento,
+                      headers={"Authorization": f"Bearer {TOKEN}"}, timeout=10)
     print("Respuesta /ingest:", r.status_code, r.json())
-    hist = requests.get(f"{BACKEND}/events", timeout=10).json()
-    print("Eventos en el historial:", len(hist))
-    if hist:
-        print("Ultimo evento:", hist[0]["level"], "-", hist[0]["reasons"])
