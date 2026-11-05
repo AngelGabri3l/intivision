@@ -8,6 +8,11 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage create-edge-device \
       --community-slug cuadra-01 --name mini-cuadra-01
   docker compose exec backend python -m backend.manage list-users
+  docker compose exec backend python -m backend.manage create-camera \
+      --community-slug cuadra-01 --name "Entrada de la cuadra" --kind common --edge-device mini-cuadra-01
+  docker compose exec backend python -m backend.manage create-camera \
+      --community-slug cuadra-01 --name "Garaje" --kind private --owner correo@ejemplo.com
+  docker compose exec backend python -m backend.manage list-cameras
   docker compose exec -it backend python -m backend.manage set-password --user correo@ejemplo.com
   docker compose exec backend python -m backend.manage set-status --user correo@ejemplo.com --status suspended
 
@@ -22,7 +27,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, db  # noqa: E402
+from backend import auth, cameras, db  # noqa: E402
 
 
 def ask_password(args, *contexto):
@@ -98,6 +103,59 @@ def create_edge_device(args):
     print(f"Mini PC creada: {did}")
     print("Token (se muestra UNA sola vez; guárdalo en la configuración de la mini PC):")
     print(token)
+
+
+def create_camera(args):
+    nombre, lugar = cameras.clean_text(args.name), cameras.clean_text(args.place or "")
+    problema = cameras.name_issue(nombre) or cameras.place_issue(lugar)
+    if problema:
+        sys.exit(problema)
+    with db.cursor() as cur:
+        cid = community_id(cur, args.community_slug)
+        owner_id = edge_id = None
+        if args.kind == "private":
+            if not args.owner:
+                sys.exit("Una cámara privada necesita --owner (correo o teléfono de su dueño).")
+            cur.execute("""SELECT id FROM users WHERE community_id = %s
+                           AND (lower(email) = lower(%s) OR phone = %s) LIMIT 1""",
+                        (cid, args.owner.strip(), args.owner.strip()))
+            row = cur.fetchone()
+            if row is None:
+                sys.exit("Ese usuario no existe en esa comunidad.")
+            owner_id = row["id"]
+        elif args.owner:
+            sys.exit("Una cámara de zona común no lleva dueño.")
+        if args.edge_device:
+            cur.execute("SELECT id FROM edge_devices WHERE community_id = %s AND name = %s LIMIT 1",
+                        (cid, args.edge_device))
+            row = cur.fetchone()
+            if row is None:
+                sys.exit("No existe esa mini PC en esa comunidad (revisa el nombre).")
+            edge_id = row["id"]
+        source = args.source_type or ("rtsp" if edge_id else "browser")
+        cur.execute("""INSERT INTO cameras (community_id, user_id, edge_device_id, kind, name, place, source_type)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (community_id, name) DO NOTHING RETURNING id""",
+                    (cid, owner_id, edge_id, args.kind, nombre, lugar or None, source))
+        row = cur.fetchone()
+    print(f"Cámara creada: {row['id']}" if row else "Ya existía una cámara con ese nombre en esa comunidad.")
+
+
+def list_cameras(args):
+    with db.cursor() as cur:
+        cur.execute("""SELECT cm.slug, c.kind, c.name, COALESCE(u.full_name, '-') AS dueno, c.source_type,
+                              COALESCE(d.name, '-') AS equipo, c.is_active,
+                              (SELECT count(*) FROM events e WHERE e.camera_id = c.id) AS eventos
+                       FROM cameras c JOIN communities cm ON cm.id = c.community_id
+                       LEFT JOIN users u ON u.id = c.user_id LEFT JOIN edge_devices d ON d.id = c.edge_device_id
+                       WHERE (%s::text IS NULL OR cm.slug = %s) ORDER BY cm.slug, c.kind, c.name""",
+                    (args.community_slug, args.community_slug))
+        rows = cur.fetchall()
+    for r in rows:
+        print(f'{r["slug"]:<16} {r["kind"]:<8} {r["name"]:<26} {r["dueno"]:<22} {r["source_type"]:<8} '
+              f'{r["equipo"]:<16} {"activa" if r["is_active"] else "inactiva":<9} {r["eventos"]} eventos')
+    if not rows:
+        print("No hay cámaras.")
 
 
 def find_user(cur, identifier):
@@ -178,6 +236,20 @@ def main():
 
     p = sub.add_parser("list-users")
     p.set_defaults(fn=list_users)
+
+    p = sub.add_parser("create-camera")
+    p.add_argument("--community-slug", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--place")
+    p.add_argument("--kind", choices=["private", "common"], default="common")
+    p.add_argument("--owner", help="correo o teléfono del dueño (solo cámaras privadas)")
+    p.add_argument("--edge-device", help="nombre de la mini PC que alimenta esta cámara")
+    p.add_argument("--source-type", choices=["browser", "rtsp", "file"])
+    p.set_defaults(fn=create_camera)
+
+    p = sub.add_parser("list-cameras")
+    p.add_argument("--community-slug")
+    p.set_defaults(fn=list_cameras)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")

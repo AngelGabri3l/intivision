@@ -262,6 +262,20 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
   *, *::before, *::after { transition: none !important; animation: none !important; }
   .spinner { border-color: hsl(var(--primary-foreground)); border-radius: 0; width: 8px; height: 8px; }
 }
+a.btn { text-decoration: none; }
+.volver[aria-current="page"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+/* --- Campos de formulario (el panel original no tenía; usan los mismos tokens) --- */
+.campo { display: grid; gap: 8px; }
+.campo__etiqueta { color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+.campo__entrada {
+  width: 100%; padding: 12px 14px; border: 1px solid hsl(var(--foreground)); border-radius: var(--radius);
+  background: hsl(var(--background)); color: hsl(var(--foreground)); font-size: 14px; font-family: inherit; min-height: 46px;
+}
+.campo__entrada:hover { background: hsl(var(--secondary)); }
+.campo__entrada:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
+.evento__camara { color: hsl(var(--muted-foreground)); font-size: 12px; overflow-wrap: anywhere; }
+.campo--camara { margin-bottom: 4px; }
+.zona__ayuda a { color: inherit; }
 </style>
 <!-- Fuente pixel de la landing (GeistPixel-Grid, paquete npm "geist" 1.8.2, SIL Open Font License 1.1).
      Va incrustada para que el panel funcione sin internet. No hace falta editar esta línea. -->
@@ -279,6 +293,8 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
     </div>
     <nav aria-label="Principal" class="cabecera__nav">
       <span class="usuario" id="usuario">{usuario}</span>
+      <a class="volver" href="/" aria-current="page">Analizar</a>
+      <a class="volver" href="/cameras">Cámaras</a>
       <form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>
       <a class="volver" id="enlace-landing" href="https://v0-vigia.vercel.app/">&larr; Volver a VIGÍA</a>
     </nav>
@@ -298,6 +314,11 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
       </div>
 
       <div class="controles">
+      <div class="campo campo--camara">
+        <label class="campo__etiqueta" for="camara-elegida">Cámara</label>
+        <select class="campo__entrada" id="camara-elegida" name="camera">{camara_opciones}</select>
+        <p class="zona__ayuda">Los eventos quedan en el historial de la cámara elegida. <a href="/cameras">Administrar mis cámaras</a></p>
+      </div>
       <div class="modos" role="tablist" aria-label="Fuente de análisis">
         <button class="modo" id="modo-video" type="button" role="tab" data-modo="video" aria-selected="true" aria-controls="formulario">Subir video</button>
         <button class="modo" id="modo-camara" type="button" role="tab" data-modo="camara" aria-selected="false" aria-controls="panel-camara" tabindex="-1">Cámara en vivo</button>
@@ -386,6 +407,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
   const formulario = $('formulario'), entrada = $('video'), zona = $('zona');
   const bloqueArchivo = $('archivo'), nombreArchivo = $('archivo-nombre'), tamanoArchivo = $('archivo-tamano');
   const botonQuitar = $('quitar'), botonAnalizar = $('analizar');
+  const camaraElegida = $('camara-elegida');
   const contenedorEventos = $('eventos'), total = $('total');
   const modoBtns = Array.from(document.querySelectorAll('.modo'));
   let ocupado = false;
@@ -502,6 +524,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
     try {
       const datos = new FormData();
       datos.append('video', archivo);
+      if (camaraElegida && camaraElegida.value) datos.append('camera', camaraElegida.value);
       const respuesta = await fetch('/analyze', { method: 'POST', body: datos });
       if (respuesta.status === 401) { window.location.href = '/login'; return; }
       let cuerpo = null;
@@ -542,7 +565,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
       if (tarjeta.dataset.listo) return;
       const imagen = tarjeta.querySelector(':scope > img');
       const bloques = Array.from(tarjeta.querySelectorAll(':scope > div'));
-      const fila = bloques[0], motivo = bloques[1], meta = bloques[2];
+      const fila = bloques[0], motivo = bloques[1], meta = bloques[2], camara = bloques[3];
       const etiquetas = fila ? fila.querySelectorAll('span') : [];
       const nivel = etiquetas[0], puntaje = etiquetas[1];
 
@@ -560,7 +583,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
       }
       const cuerpo = document.createElement('div');
       cuerpo.className = 'evento__cuerpo';
-      [fila, motivo, meta].forEach((bloque) => { if (bloque) { bloque.removeAttribute('style'); cuerpo.appendChild(bloque); } });
+      [fila, motivo, meta, camara].forEach((bloque) => { if (bloque) { bloque.removeAttribute('style'); cuerpo.appendChild(bloque); } });
       tarjeta.appendChild(cuerpo);
 
       if (fila) fila.className = 'evento__fila';
@@ -576,6 +599,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
       }
       if (motivo) motivo.className = 'evento__motivo';
       if (meta) formatearMeta(meta);
+      if (camara) camara.className = 'evento__camara';
     });
 
     /* Estado vacío: el servidor solo envía un <p> sin tarjetas. */
@@ -706,7 +730,8 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
     try { await camVideo.play(); } catch (_) { /* autoplay ya está activo */ }
 
     mostrarEstado('vivo', 'Conectando con el servidor…', estadoCam);
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws/live');
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws/live' +
+      (camaraElegida && camaraElegida.value ? '?camera=' + encodeURIComponent(camaraElegida.value) : ''));
     ws.onopen = () => {
       enVivo = true;
       camCaja.classList.add('activa');
@@ -727,6 +752,7 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
       const estabaConectada = enVivo;
       detenerCamara();
       if (ev && ev.code === 4401) { window.location.href = '/login'; return; }
+      if (ev && ev.code === 4404) { mostrarEstado('error', 'Esa cámara no existe o no es tuya. Recarga la página y elige otra.', estadoCam); return; }
       if (ev && ev.code === 4403) { mostrarEstado('error', 'Conexión rechazada: el origen de la página no está permitido.', estadoCam); return; }
       mostrarEstado('error', estabaConectada ? 'Se perdió la conexión con el servidor.' : 'No se pudo conectar con el servidor de análisis.', estadoCam);
     };

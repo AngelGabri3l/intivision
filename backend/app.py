@@ -21,7 +21,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db, auth  # noqa: E402
+from backend import db, auth, cameras, pages  # noqa: E402
+from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE, "backend", "data")
@@ -71,15 +72,6 @@ IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def fill(template, **values):
-    """
-    Sustituye {nombre} en UNA sola pasada. Lo que se inserta no se vuelve a interpretar: si un usuario
-    se llamara «{cards}» o escribiera «{error}» en el login, no podría colar contenido en la página.
-    """
-    patron = r"\{(" + "|".join(re.escape(k) for k in values) + r")\}"
-    return re.sub(patron, lambda m: values[m.group(1)], template)
-
-
 def clean_filename(name):
     """Nombre seguro a partir del que manda el navegador: sin carpetas, sin símbolos raros, de largo acotado."""
     base = os.path.basename((name or "video").replace("\\", "/")).replace(" ", "_")
@@ -112,6 +104,10 @@ def validate_event(e):
     if imagen is not None and (not isinstance(imagen, str) or not IMAGE_NAME_RE.match(imagen)):
         return None, "image debe ser un nombre de archivo simple (letras, números, punto, guion)."
     out["image"] = imagen
+    camara = e.get("camera_id")
+    if camara is not None and not cameras.is_uuid(camara):
+        return None, "camera_id no es un identificador válido."
+    out["camera_id"] = camara
     return out, None
 
 
@@ -204,7 +200,6 @@ REASON_CODES = [
     ("posible asalto", "hands_up"),
 ]
 DETAIL_CODES = {"loitering", "group"}          # estos llevan detalle ("merodeo 18s", "grupo de 3")
-SOURCE_LABELS = {"browser": "Cámara web", "video": "Video", "edge": "Mini PC"}
 
 
 def parse_reasons(reasons):
@@ -252,31 +247,57 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
                                             storage_key, size_bytes)
                    VALUES (%s,%s,%s,%s,'image',%s,%s) ON CONFLICT (storage_key) DO NOTHING""",
                 (community, owner, camera_id, event_id, image, size))
+        if camera_id:
+            cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
     return event_id
 
 
-def list_events(user, limit=100):
-    """Residente: sus eventos. Administrador: los de su comunidad (salvo cámaras que no comparte)."""
+_EVENTS_SELECT = """
+    SELECT e.id,
+           to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+           e.source, e.video_time_s, e.level, e.score,
+           COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
+                     FROM event_signals es JOIN signals s ON s.code = es.signal_code
+                     WHERE es.event_id = e.id), '') AS reasons,
+           (SELECT m.storage_key FROM media_files m
+             WHERE m.event_id = e.id AND m.kind = 'image'
+             ORDER BY m.created_at LIMIT 1) AS image,
+           e.people_count AS people, e.status,
+           c.name AS camera_name,
+           COALESCE(cu.full_name, eu.full_name) AS owner_name
+    FROM events e
+    LEFT JOIN cameras c ON c.id = e.camera_id
+    LEFT JOIN users cu ON cu.id = c.user_id
+    LEFT JOIN users eu ON eu.id = e.user_id
+    WHERE """
+
+
+def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=None):
+    """
+    Residente: los eventos suyos o de sus cámaras. Administrador: los de su comunidad, salvo los de cámaras
+    que su dueño le oculta. Opcional: una sola cámara, un nivel o un rango de fechas (hora de Lima).
+    """
     limit = max(1, min(int(limit), 500))
-    base = """
-        SELECT e.id,
-               to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
-               e.source, e.video_time_s, e.level, e.score,
-               COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
-                         FROM event_signals es JOIN signals s ON s.code = es.signal_code
-                         WHERE es.event_id = e.id), '') AS reasons,
-               (SELECT m.storage_key FROM media_files m
-                 WHERE m.event_id = e.id AND m.kind = 'image'
-                 ORDER BY m.created_at LIMIT 1) AS image,
-               e.people_count AS people, e.status
-        FROM events e LEFT JOIN cameras c ON c.id = e.camera_id
-        WHERE """
     if user["role"] == "community_admin":
-        sql = base + "e.community_id = %s AND (c.id IS NULL OR c.admin_can_view) ORDER BY e.id DESC LIMIT %s"
-        args = (user["community_id"], limit)
+        condiciones = ["e.community_id = %s AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)"]
+        args = [user["community_id"], user["id"]]
     else:
-        sql = base + "e.user_id = %s ORDER BY e.id DESC LIMIT %s"
-        args = (user["id"], limit)
+        condiciones = ["(e.user_id = %s OR c.user_id = %s)"]
+        args = [user["id"], user["id"]]
+    if camera_id:
+        condiciones.append("e.camera_id = %s")
+        args.append(camera_id)
+    if level:
+        condiciones.append("e.level = %s")
+        args.append(level)
+    if desde:
+        condiciones.append("e.occurred_at >= (%s::date)::timestamp AT TIME ZONE 'America/Lima'")
+        args.append(desde)
+    if hasta:
+        condiciones.append("e.occurred_at < ((%s::date) + 1)::timestamp AT TIME ZONE 'America/Lima'")
+        args.append(hasta)
+    sql = _EVENTS_SELECT + " AND ".join(condiciones) + " ORDER BY e.id DESC LIMIT %s"
+    args.append(limit)
     with db.cursor() as cur:
         cur.execute(sql, args)
         rows = cur.fetchall()
@@ -374,8 +395,8 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    quiere_html = (request.method == "GET" and request.url.path == "/"
-                   and "text/html" in request.headers.get("accept", ""))
+    pagina = request.url.path == "/" or request.url.path.startswith("/cameras")
+    quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
     return JSONResponse(status_code=401, content={"error": "No has iniciado sesión."})
@@ -503,13 +524,13 @@ def health():
 
 # ---------------------- CÁMARA EN VIVO ----------------------
 
-def _process_frame(session, data, user):
+def _process_frame(session, data, user, camera_id):
     frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         return None
     out = session.process(frame)
     if out["event"]:
-        insert_event(out["event"], user=user, source_kind="browser")
+        insert_event(out["event"], user=user, source_kind="browser", camera_id=camera_id)
         dispatch_live_alert(out["event"])
     return out
 
@@ -529,14 +550,23 @@ async def ws_live(ws: WebSocket):
     if user is None:
         await ws.close(code=4401)           # sin sesión o sesión vencida
         return
+    try:
+        camera = await asyncio.to_thread(cameras.resolve_camera, user, ws.query_params.get("camera"))
+    except (psycopg2.OperationalError, psycopg2.pool.PoolError):
+        await ws.close(code=1013)
+        return
+    if camera is None:
+        await ws.close(code=4404)           # esa cámara no existe o no es del usuario
+        return
+    await asyncio.to_thread(cameras.touch_camera, camera["id"])
     engine = await asyncio.to_thread(get_engine)
     session = engine.new_session(EVIDENCE_DIR)
-    log.info("Cámara en vivo conectada (usuario %s).", user["id"])
+    log.info("Cámara en vivo conectada (usuario %s, cámara %s).", user["id"], camera["id"])
     try:
         while True:
             data = await ws.receive_bytes()
             # La inferencia es bloqueante: se ejecuta en un hilo para no frenar el servidor.
-            out = await asyncio.to_thread(_process_frame, session, data, user)
+            out = await asyncio.to_thread(_process_frame, session, data, user, camera["id"])
             if out is not None:
                 await ws.send_json(out)
     except WebSocketDisconnect:
@@ -544,11 +574,14 @@ async def ws_live(ws: WebSocket):
 
 
 @app.post("/analyze")
-async def analyze(video: UploadFile = File(...), user: dict = Depends(auth.current_user)):
+async def analyze(video: UploadFile = File(...), camera: str = Form(""), user: dict = Depends(auth.current_user)):
     """
     Analiza un video y guarda los EVENTOS encontrados. El video no se conserva: se copia a un
     archivo temporal con nombre único (el motor lo abre por ruta), se analiza, y se borra siempre.
     """
+    cam = await asyncio.to_thread(cameras.resolve_camera, user, camera)
+    if cam is None:
+        return JSONResponse(status_code=404, content={"error": "Esa cámara no existe o no es tuya."})
     label = clean_filename(video.filename)
     extension = os.path.splitext(label)[1].lower()
     if extension not in VIDEO_EXTENSIONS:
@@ -572,7 +605,7 @@ async def analyze(video: UploadFile = File(...), user: dict = Depends(auth.curre
             log.exception("Falló el análisis del video %s", label)       # el detalle queda en el registro, no en la respuesta
             return JSONResponse(status_code=500, content={"error": "No se pudo analizar el video. Prueba con otro archivo."})
         for e in events:
-            insert_event(e, user=user, source_kind="video")
+            insert_event(e, user=user, source_kind="video", camera_id=cam["id"])
         dispatch_alerts(events, label)
         return {"archivo": label, "eventos_detectados": len(events), "eventos": events}
     finally:
@@ -602,7 +635,13 @@ async def ingest(request: Request):
     limpio, motivo = validate_event(e)
     if motivo:
         return JSONResponse(status_code=422, content={"error": motivo})
-    await asyncio.to_thread(insert_event, limpio, None, edge["community_id"], "edge")
+    camera_id = None
+    if limpio.get("camera_id"):
+        camara = await asyncio.to_thread(cameras.edge_camera, edge, limpio["camera_id"])
+        if camara is None:
+            return JSONResponse(status_code=422, content={"error": "Esa cámara no está asignada a este equipo."})
+        camera_id = camara["id"]
+    await asyncio.to_thread(insert_event, limpio, None, edge["community_id"], "edge", camera_id)
     return {"ok": True}
 
 
@@ -622,10 +661,13 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
             cur.execute(
                 """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
                    WHERE m.storage_key = %s AND m.community_id = %s
-                     AND (c.id IS NULL OR c.admin_can_view)""", (safe, user["community_id"]))
+                     AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)""",
+                (safe, user["community_id"], user["id"]))
         else:
-            cur.execute("SELECT user_id FROM media_files WHERE storage_key = %s AND user_id = %s",
-                        (safe, user["id"]))
+            cur.execute(
+                """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
+                   WHERE m.storage_key = %s AND (m.user_id = %s OR c.user_id = %s)""",
+                (safe, user["id"], user["id"]))
         row = cur.fetchone()
         path = os.path.join(EVIDENCE_DIR, safe)
         if row is None or not os.path.exists(path):
@@ -641,11 +683,73 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
     return FileResponse(path)
 
 
+# ---------------------- cámaras ----------------------
+
+def _parse_date(text):
+    try:
+        return datetime.date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+
+
+def _camera_not_found(user):
+    # La misma respuesta para «no existe» y «no es tuya»: no se revela qué cámaras hay.
+    return HTMLResponse(pages.render_cameras(user, cameras.list_cameras(user),
+                                             message="Esa cámara no existe o no tienes acceso."), status_code=404)
+
+
+@app.get("/cameras", response_class=HTMLResponse)
+def cameras_page(user: dict = Depends(auth.current_user)):
+    return HTMLResponse(pages.render_cameras(user, cameras.list_cameras(user)))
+
+
+@app.post("/cameras", response_class=HTMLResponse)
+def cameras_create(name: str = Form(""), place: str = Form(""), user: dict = Depends(auth.current_user)):
+    cam, problema = cameras.create_camera(user, name, place)
+    if problema:
+        return HTMLResponse(pages.render_cameras(user, cameras.list_cameras(user), message=problema,
+                                                 values=(name[:200], place[:200])), status_code=400)
+    return RedirectResponse(f"/cameras/{cam['id']}", status_code=303)
+
+
+@app.get("/cameras/{camera_id}", response_class=HTMLResponse)
+def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = "", hasta: str = "",
+                limite: str = "12", user: dict = Depends(auth.current_user)):
+    cam = cameras.get_camera(user, camera_id)
+    if cam is None:
+        return _camera_not_found(user)
+    nivel = nivel.upper() if nivel.upper() in cameras.LEVELS else ""
+    d_desde, d_hasta = _parse_date(desde), _parse_date(hasta)
+    aviso = "Una fecha no es válida y se ignoró." if (desde and not d_desde) or (hasta and not d_hasta) else None
+    limite = max(12, min(int(limite), 200)) if limite.isascii() and limite.isdigit() else 12
+    rows = list_events(user, limite + 1, camera_id=cam["id"], level=nivel or None, desde=d_desde, hasta=d_hasta)
+    if user["role"] == "community_admin" and cam["kind"] == "private" and cam["user_id"] != user["id"]:
+        with db.cursor() as cur:        # el administrador abrió la cámara de otra persona: queda registrado
+            cur.execute(
+                """INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id, ip)
+                   VALUES ('user', %s, %s, %s, 'view_camera', 'camera', %s, %s)""",
+                (user["id"], user["community_id"], cam["user_id"], cam["id"], auth._clean_ip(auth.client_ip(request))))
+    return HTMLResponse(pages.render_camera(
+        user, cam, rows[:limite], nivel, desde if d_desde else "", hasta if d_hasta else "", limite,
+        len(rows) > limite, aviso))
+
+
+@app.post("/cameras/{camera_id}/visibilidad")
+def camera_visibility(camera_id: str, visible: str = Form(""), user: dict = Depends(auth.current_user)):
+    if not cameras.set_admin_visibility(user, camera_id, visible == "1"):
+        return _camera_not_found(user)
+    return RedirectResponse(f"/cameras/{camera_id}", status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, user: dict = Depends(auth.current_user)):
     rows = list_events(user, 50)
     cards = ""
     for r in rows:
+        partes = [r["camera_name"]] if r["camera_name"] else []
+        if user["role"] == "community_admin" and r["owner_name"]:
+            partes.append("de " + r["owner_name"])
+        extra = f'<div>{html.escape(" · ".join(partes))}</div>' if partes else ""
         color = {"ALTO": "#e74c3c", "MEDIO": "#f39c12", "BAJO": "#2ecc71"}.get(r["level"], "#888")
         img = (f'<img src="/evidence/{html.escape(r["image"])}" style="width:100%;border-radius:8px">'
                if r["image"] else "")
@@ -660,13 +764,19 @@ def home(request: Request, user: dict = Depends(auth.current_user)):
           </div>
           <div style="font-size:14px;margin-top:6px">{html.escape(r["reasons"] or "")}</div>
           <div style="font-size:12px;color:#888;margin-top:6px">{html.escape(origen)} · {vt} · {r["created_at"]}</div>
+          {extra}
         </div>"""
     if not cards:
         cards = '<p style="color:#888">Aun no hay eventos. Inicia la cámara para monitorear.</p>'
     with open(os.path.join(TEMPLATES_DIR, "index.html"), encoding="utf-8") as fh:
         template = fh.read()
     rol = "Administrador" if user["role"] == "community_admin" else "Residente"
+    propias = cameras.usable_cameras(user)
+    if propias:
+        opciones = "".join(f'<option value="{pages.esc(c["id"])}">{pages.esc(c["name"])}</option>' for c in propias)
+    else:
+        opciones = f'<option value="">Se creará «Cámara de {pages.esc(user["full_name"])}» automáticamente</option>'
     return HTMLResponse(
         fill(template, usuario=f'{html.escape(user["full_name"])} · {rol}', cards=cards,
-             nonce=request.state.csp_nonce),
+             nonce=request.state.csp_nonce, camara_opciones=opciones),
         headers={"Cache-Control": "no-store"})
