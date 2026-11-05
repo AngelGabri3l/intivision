@@ -3,7 +3,7 @@ pose_detector.py — Detección de POSTURA con YOLO-Pose.
 
 Reconoce posturas de amenaza con geometría simple sobre los 17 puntos del cuerpo:
   - "trepar"       : muñecas sobre hombros + rodilla elevada
-  - "caido"        : cuerpo horizontal (posible víctima)
+  - "caido"        : tronco horizontal, con hombros y caderas visibles (posible víctima)
   - "manos_arriba" : muñecas sobre la cabeza (posible asalto)
 
 Las posturas SUMAN al puntaje de amenaza; no disparan solas. Corre solo cuando ya
@@ -40,9 +40,19 @@ def classify_posture(xy, kconf, bbox, min_conf=0.3):
     elif ls or rs:
         head_y = min(p[1] for p in [ls, rs] if p)
 
-    # 1) CAÍDO: caja más ancha que alta
-    if box_w > box_h * 1.2:
-        postures.add("caido")
+    # 1) CAÍDO: el tronco (hombros -> caderas) está más horizontal que vertical.
+    #    Hace falta ver hombros Y caderas: con una cámara cercana (por ejemplo la de una
+    #    laptop) solo se ve la parte alta del cuerpo y la caja sale ancha aunque la
+    #    persona esté sentada o de pie. Sin caderas no se puede afirmar que esté en el suelo.
+    shoulders = [p for p in (ls, rs) if p]
+    hips = [p for p in (lh, rh) if p]
+    if shoulders and hips:
+        torso_dx = abs(sum(p[0] for p in shoulders) / len(shoulders)
+                       - sum(p[0] for p in hips) / len(hips))
+        torso_dy = abs(sum(p[1] for p in shoulders) / len(shoulders)
+                       - sum(p[1] for p in hips) / len(hips))
+        if torso_dx > torso_dy * 1.5 and torso_dx > 0.12 * max(box_w, box_h):
+            postures.add("caido")
 
     # 2) MANOS ARRIBA: muñecas sobre el rostro (exige nariz para no confundir con trepar)
     if nose and lw and rw and lw[1] < nose[1] and rw[1] < nose[1]:

@@ -7,7 +7,7 @@ services:
     container_name: guardian-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=${DATABASE_URL:?Define DATABASE_URL en el archivo .env}
