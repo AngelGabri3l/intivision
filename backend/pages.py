@@ -8,7 +8,7 @@ import os
 import re
 from urllib.parse import urlencode
 
-from backend import cameras
+from backend import alerts, cameras
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 SOURCE_LABELS = {"browser": "Cámara web", "video": "Video", "edge": "Mini PC"}
@@ -42,13 +42,17 @@ def nav(user, active) -> str:
         return f'<a class="volver" href="{href}"{actual}>{text}</a>'
     return (f'<span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
             + link("/", "Analizar", "analizar") + link("/cameras", "Cámaras", "camaras")
+            + link("/alerts", "Alertas", "alertas")
             + '<form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>')
+
+
+_ALERT_LABELS = {"error": "Error", "alerta": "Aviso", "ok": "Listo", "info": "Info"}
 
 
 def alert_block(message, kind="error") -> str:
     if not message:
         return ""
-    etiqueta = "Aviso" if kind == "alerta" else "Error"
+    etiqueta = _ALERT_LABELS.get(kind, "Aviso")
     return (f'<p class="estado" data-tipo="{esc(kind)}" role="alert"><span class="estado__tag">{etiqueta}</span>'
             f'<span>{esc(message)}</span></p>')
 
@@ -209,3 +213,70 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
         aviso=alert_block(message, "alerta"), resumen=resumen, datos=datos, visibilidad=visibilidad,
         filtros=filtros, total=esc(count_text(len(events), "evento", "eventos")) + ("+" if has_more else ""),
         eventos=lista, mas=mas)
+
+
+# ------------------------------------------------------------------ alertas por Telegram
+
+_DELIVERY_TEXT = {"sent": ("Enviado", "ok"), "pending": ("Pendiente", "info"), "failed": ("No se pudo enviar", "error")}
+
+
+def delivery_row(r) -> str:
+    texto, tipo = _DELIVERY_TEXT.get(r["status"], ("—", "info"))
+    detalle = f' title="{esc(r["last_error"])}"' if r["last_error"] else ""
+    return (f'<div class="aviso">{level_badge(r["level"])}<span class="aviso__camara">{esc(r["camera_name"] or "Sin cámara")}</span>'
+            f'<span class="aviso__fecha">{esc(r["cuando"])}</span>'
+            f'<span class="aviso__estado aviso__estado--{tipo}"{detalle}>{texto}</span></div>')
+
+
+def _linked_panel(channel) -> str:
+    activo = channel["is_active"]
+    estado = ('<span class="punto punto--activa"></span> Vinculado · alertas activas' if activo
+              else '<span class="punto"></span> Vinculado · alertas en pausa')
+
+    def radio(valor, texto):
+        marcado = " checked" if channel["min_level"] == valor else ""
+        return f'<label class="opcion"><input type="radio" name="min_level" value="{valor}"{marcado}> {texto}</label>'
+    return (f'<form class="canal" method="post" action="/alerts/settings">'
+            f'<p class="canal__estado">{estado}</p>'
+            f'<fieldset class="opciones"><legend class="campo__etiqueta">Avisarme desde el nivel</legend>'
+            f'{radio("MEDIO", "Medio y alto")}{radio("ALTO", "Solo alto")}</fieldset>'
+            f'<label class="opcion"><input type="checkbox" name="active" value="1"{" checked" if activo else ""}> Alertas activas</label>'
+            f'<div><button class="btn" type="submit">Guardar</button></div></form>'
+            f'<div class="canal__acciones">'
+            f'<form method="post" action="/alerts/test"><button class="btn btn--texto" type="submit">Enviar mensaje de prueba</button></form>'
+            f'<form method="post" action="/alerts/unlink"><button class="btn btn--texto" type="submit">Desvincular</button></form></div>'
+            f'<p class="zona__ayuda">Desvincular detiene los avisos nuevos; los mensajes que ya llegaron siguen en tu Telegram.</p>')
+
+
+def render_alerts(user, channel, configured, recent, notice=None, link=None) -> str:
+    if not configured:
+        panel = alert_block("Telegram no está configurado en este servidor: falta definir TELEGRAM_TOKEN.", "alerta")
+    elif link:
+        panel = (f'<div class="canal"><p class="canal__texto">Abre este enlace en tu celular y pulsa <strong>Iniciar</strong> '
+                 f'en Telegram. Vale {alerts.CODE_MINUTES} minutos y se usa una sola vez.</p>'
+                 f'<div><a class="btn" href="{esc(link)}">Abrir Telegram</a></div>'
+                 f'<p class="canal__enlace">{esc(link)}</p>'
+                 f'<div><a class="btn btn--texto" href="/alerts">Ya lo abrí, actualizar</a></div></div>')
+    elif channel and channel["verified_at"]:
+        panel = _linked_panel(channel)
+    else:
+        pendiente = ""
+        if channel and channel["link_pending"]:
+            pendiente = (f'<p class="canal__texto">Hay un enlace pendiente (vence en {channel["link_minutes"]} min). '
+                         f'Si lo perdiste, genera otro.</p>')
+        panel = ('<div class="canal"><p class="canal__texto">Recibe en tu celular una foto cada vez que se detecte algo en '
+                 'tus cámaras. Los avisos de una cámara los recibe solo su dueño.</p>' + pendiente +
+                 '<form method="post" action="/alerts/link"><button class="btn" type="submit">'
+                 + ('Generar otro enlace' if pendiente else 'Vincular Telegram') + '</button></form></div>')
+    if recent:
+        avisos = "".join(delivery_row(r) for r in recent)
+    else:
+        avisos = ('<div class="vacio"><p class="vacio__titulo">Aún no hay avisos</p>'
+                  '<p class="vacio__texto">Cuando se detecte algo en tus cámaras, aquí verás si el aviso se envió.</p></div>')
+    return fill(
+        read_template("alertas.html"),
+        nav=nav(user, "alertas"),
+        descripcion=("Vincula tu Telegram para recibir en tu celular la foto y los datos de cada alerta. "
+                     "Elige desde qué nivel quieres que te avisemos."),
+        aviso=alert_block(notice[1], notice[0]) if notice else "", panel=panel,
+        total=esc(count_text(len(recent), "aviso", "avisos")) if recent else "", avisos=avisos)

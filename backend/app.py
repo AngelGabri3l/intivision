@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db, auth, cameras, pages  # noqa: E402
+from backend import db, auth, cameras, pages, alerts  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +45,7 @@ _docs = os.environ.get("ENABLE_DOCS") == "1"
 app = FastAPI(title="GUARDIAN Backend", docs_url="/docs" if _docs else None,
               redoc_url="/redoc" if _docs else None, openapi_url="/openapi.json" if _docs else None)
 _engine = None       # se crea en el primer análisis (carga modelos; puede tardar)
-_dispatcher = None   # actuador (MQTT) + notificador (Telegram), creado una vez
+_dispatcher = None   # actuador (sirena por MQTT), creado una vez
 
 
 def load_cfg():
@@ -218,10 +218,11 @@ def parse_reasons(reasons):
     return out
 
 
-def insert_event(e, user=None, community_id=None, source_kind="browser", camera_id=None):
+def insert_event(e, user=None, community_id=None, source_kind="browser", camera_id=None, notify=True):
     """
     Guarda un evento con sus motivos (event_signals) y su imagen (media_files). Si viene `user`,
     el evento es de ese usuario y de su comunidad; si no (mini PC), solo de la comunidad.
+    Si es MEDIO o ALTO y `notify`, deja en la cola los avisos por Telegram de quien corresponda.
     """
     owner = user["id"] if user else None
     community = user["community_id"] if user else community_id
@@ -249,6 +250,8 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
                 (community, owner, camera_id, event_id, image, size))
         if camera_id:
             cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
+        if notify:
+            alerts.enqueue(cur, event_id, community, camera_id, owner, e.get("level"))
     return event_id
 
 
@@ -310,18 +313,14 @@ def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=N
 # ---------------------- alertas (actuador + Telegram) ----------------------
 
 def get_dispatcher():
-    """Crea una sola vez el actuador (MQTT/simulado) y el notificador (Telegram)."""
+    """Crea una sola vez el actuador (sirena por MQTT o simulada). Los avisos por Telegram van por backend/alerts.py."""
     global _dispatcher
     if _dispatcher is None:
         from actuator import build_actuator
-        from notifier import Notifier
         cfg = load_cfg()
-        n = cfg.get("notifier", {})
         _dispatcher = {
             "actuator": build_actuator(cfg),
-            "notifier": Notifier(EVIDENCE_DIR, n.get("telegram_token"), n.get("telegram_chat_id")),
             "siren_s": cfg.get("actuator", {}).get("siren_seconds", 10),
-            "zone": cfg.get("zone_name", "Cuadra 01"),
             "enabled": cfg.get("analysis", {}).get("dispatch_alerts", True),
         }
     return _dispatcher
@@ -329,16 +328,15 @@ def get_dispatcher():
 
 def dispatch_alerts(events, source):
     """
-    Envía las alertas de un video analizado:
-      - MQTT: una orden por evento (WARN para MEDIO, ON para ALTO), para verla en Wokwi.
-      - Telegram: solo la del evento más grave del video (evita llenar el chat).
+    Sirena de un video analizado: una orden MQTT por evento (WARN para MEDIO, ON para ALTO), para verla en Wokwi.
+    Se ejecuta en un hilo (tiene pausas). El aviso por Telegram sale por la cola de alertas, no por aquí.
     """
     d = get_dispatcher()
     if not d["enabled"]:
         log.info("Despacho de alertas desactivado (analysis.dispatch_alerts=false).")
         return
     if not events:
-        log.info("Video %s: sin eventos MEDIO/ALTO, no se envía ninguna alerta.", source)
+        log.info("Video %s: sin eventos MEDIO/ALTO, no se activa ninguna alerta.", source)
         return
     log.warning("Video %s: despachando %d alerta(s)...", source, len(events))
     for e in events:
@@ -349,36 +347,28 @@ def dispatch_alerts(events, source):
         elif e["level"] == "MEDIO":
             d["actuator"].warn()
         time.sleep(0.5)  # separa los mensajes para verlos uno a uno en Wokwi
-    worst = max(events, key=lambda e: e["score"])
-    meta = {"zone": d["zone"], "level": worst["level"], "score": worst["score"],
-            "reasons": worst["reasons"].split(", ") if worst["reasons"] else [],
-            "time": datetime.datetime.now().strftime("%H:%M:%S")}
-    d["notifier"].send_photo(os.path.join(EVIDENCE_DIR, worst["image"]), meta)
 
 
-LEVEL_COOLDOWN = {"MEDIO": 45, "ALTO": 20}   # segundos entre alertas externas (MQTT/Telegram)
+LEVEL_COOLDOWN = {"MEDIO": 45, "ALTO": 20}   # segundos entre órdenes a la sirena, por cámara
 _last_alert = {}
 
 
-def dispatch_live_alert(event):
-    """Alerta externa de un evento en vivo (con cooldown por nivel para no saturar)."""
+def dispatch_live_alert(event, camera_id=None):
+    """Sirena de un evento en vivo, con espera por cámara y nivel para no saturar."""
     d = get_dispatcher()
     if not d["enabled"]:
         return
     now = time.time()
     level = event["level"]
-    if now - _last_alert.get(level, 0) < LEVEL_COOLDOWN.get(level, 30):
+    clave = (camera_id, level)
+    if now - _last_alert.get(clave, 0) < LEVEL_COOLDOWN.get(level, 30):
         return
-    _last_alert[level] = now
+    _last_alert[clave] = now
     log.warning("EN VIVO | nivel %s | puntaje %s | %s", level, event["score"], event["reasons"])
     if level == "ALTO":
         d["actuator"].trigger(d["siren_s"])
     elif level == "MEDIO":
         d["actuator"].warn()
-    meta = {"zone": d["zone"], "level": level, "score": event["score"],
-            "reasons": event["reasons"].split(", ") if event["reasons"] else [],
-            "time": datetime.datetime.now().strftime("%H:%M:%S")}
-    d["notifier"].send_photo(os.path.join(EVIDENCE_DIR, event["image"]), meta)
 
 
 # ---------------------- errores ----------------------
@@ -395,7 +385,7 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    pagina = request.url.path == "/" or request.url.path.startswith("/cameras")
+    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
@@ -511,6 +501,14 @@ def startup():
         # La base puede arrancar después: se reintenta en cada petición.
         log.error("Todavía no se puede usar la base de datos: %s", ex)
     get_dispatcher()
+    cfg = load_cfg()
+    alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
+    alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+
+
+@app.on_event("shutdown")
+def shutdown():
+    alerts.stop()
 
 
 @app.get("/health")
@@ -531,7 +529,7 @@ def _process_frame(session, data, user, camera_id):
     out = session.process(frame)
     if out["event"]:
         insert_event(out["event"], user=user, source_kind="browser", camera_id=camera_id)
-        dispatch_live_alert(out["event"])
+        dispatch_live_alert(out["event"], camera_id)
     return out
 
 
@@ -604,9 +602,10 @@ async def analyze(video: UploadFile = File(...), camera: str = Form(""), user: d
         except Exception:
             log.exception("Falló el análisis del video %s", label)       # el detalle queda en el registro, no en la respuesta
             return JSONResponse(status_code=500, content={"error": "No se pudo analizar el video. Prueba con otro archivo."})
-        for e in events:
-            insert_event(e, user=user, source_kind="video", camera_id=cam["id"])
-        dispatch_alerts(events, label)
+        peor = max(events, key=lambda ev: ev["score"]) if events else None
+        for e in events:       # un video avisa solo por su evento más grave, para no llenar el chat
+            insert_event(e, user=user, source_kind="video", camera_id=cam["id"], notify=e is peor)
+        await asyncio.to_thread(dispatch_alerts, events, label)
         return {"archivo": label, "eventos_detectados": len(events), "eventos": events}
     finally:
         try:
@@ -739,6 +738,58 @@ def camera_visibility(camera_id: str, visible: str = Form(""), user: dict = Depe
     if not cameras.set_admin_visibility(user, camera_id, visible == "1"):
         return _camera_not_found(user)
     return RedirectResponse(f"/cameras/{camera_id}", status_code=303)
+
+
+# ---------------------- alertas por Telegram ----------------------
+
+ALERT_NOTICES = {
+    "guardado": ("ok", "Preferencias guardadas."),
+    "probado": ("ok", "Te mandamos un mensaje de prueba. Revisa tu Telegram."),
+    "desvinculado": ("ok", "Telegram desvinculado. Ya no recibirás alertas."),
+    "espera": ("alerta", "Espera unos segundos antes de pedir otra prueba."),
+    "fallo": ("error", "Telegram no pudo entregar el mensaje. Si bloqueaste el bot, desbloquéalo y vincula de nuevo."),
+    "no_vinculado": ("error", "Primero vincula tu Telegram."),
+}
+
+
+def _alerts_response(user, notice=None, link=None, status=200):
+    return HTMLResponse(pages.render_alerts(user, alerts.get_channel(user["id"]), alerts.available(),
+                                            alerts.recent_deliveries(user["id"]), notice=notice, link=link),
+                        status_code=status)
+
+
+@app.get("/alerts", response_class=HTMLResponse)
+def alerts_page(m: str = "", user: dict = Depends(auth.current_user)):
+    return _alerts_response(user, notice=ALERT_NOTICES.get(m))
+
+
+@app.post("/alerts/link", response_class=HTMLResponse)
+def alerts_link(user: dict = Depends(auth.current_user)):
+    link, problema = alerts.create_link(user)
+    if problema:
+        return _alerts_response(user, notice=("error", problema), status=429 if "demasiados" in problema else 503)
+    return _alerts_response(user, link=link)
+
+
+@app.post("/alerts/unlink")
+def alerts_unlink(user: dict = Depends(auth.current_user)):
+    alerts.unlink(user["id"])
+    return RedirectResponse("/alerts?m=desvinculado", status_code=303)
+
+
+@app.post("/alerts/settings")
+def alerts_settings(min_level: str = Form("MEDIO"), active: str = Form(""), user: dict = Depends(auth.current_user)):
+    if min_level not in alerts.LEVELS:
+        return _alerts_response(user, notice=("error", "Nivel no válido."), status=400)
+    if not alerts.set_preferences(user["id"], min_level, active == "1"):
+        return _alerts_response(user, notice=ALERT_NOTICES["no_vinculado"], status=400)
+    return RedirectResponse("/alerts?m=guardado", status_code=303)
+
+
+@app.post("/alerts/test")
+def alerts_test(user: dict = Depends(auth.current_user)):
+    ok, motivo = alerts.send_test(user)
+    return RedirectResponse("/alerts?m=" + ("probado" if ok else motivo), status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
