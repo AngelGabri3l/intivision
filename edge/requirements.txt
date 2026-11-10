@@ -1,0 +1,5 @@
+# Dependencias del agente de la mini PC (H1: descubrimiento y lectura de cámaras).
+# Ligero a propósito: sin PyTorch ni YOLO. El motor de detección entra en H2.
+opencv-python-headless>=4.8.0,<6   # probado con 4.13 y 5.0
+numpy>=1.24.0,<3
+PyYAML>=6.0,<7

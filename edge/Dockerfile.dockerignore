@@ -1,0 +1,7 @@
+# BuildKit usa este archivo en lugar del .dockerignore de la raíz al construir edge/Dockerfile.
+# Lista blanca: se excluye todo salvo lo que el Dockerfile copia (así no entra ningún .env ni dato).
+**
+!edge/requirements.txt
+!edge/agent
+**/__pycache__
+**/*.pyc

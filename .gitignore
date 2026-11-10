@@ -12,3 +12,6 @@ events/
 backend/data/
 *.dump
 backups/
+edge/data/*
+!edge/data/.gitkeep
+edge/.env

@@ -14,3 +14,4 @@ tests/
 backend/test_*.py
 bd_intivision/
 wokwi/
+edge/

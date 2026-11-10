@@ -1,0 +1,25 @@
+# Agente de la mini PC. Requiere Linux (Ubuntu Server) con Docker Engine.
+#   cd edge
+#   cp agent.example.yaml data/agent.yaml     # opcional: sin él se usan los valores por defecto
+#   docker compose run --rm agent listar      # muestra las cámaras detectadas
+#   docker compose up -d                      # deja el agente vigilando
+services:
+  agent:
+    image: vigia-agent
+    build:
+      context: ..
+      dockerfile: edge/Dockerfile
+    restart: unless-stopped
+    network_mode: host          # necesario para descubrir cámaras ONVIF (multicast)
+    volumes:
+      - /dev:/dev               # ve las cámaras USB, también las que se conecten después
+      - ./data:/data            # configuración, inventario y muestras
+    device_cgroup_rules:
+      - 'c 81:* rmw'            # permite usar cualquier dispositivo de video de Linux (V4L2)
+    environment:
+      - AGENT_CONFIG=/data/agent.yaml
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
