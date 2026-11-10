@@ -99,7 +99,7 @@ def cmd_leer(args, cfg) -> int:
         print(f"{info.label}: no está disponible ({ESTADOS_ES.get(info.state, info.state)}: {info.detail or 'sin detalle'}).", file=sys.stderr)
         return 1
 
-    captura = Captura(info, cfg.width, cfg.height, cfg.fps)
+    captura = Captura(info, cfg.width, cfg.height, cfg.fps, formato=args.formato or cfg.pixel_format)
     captura.start()
     inicio = time.monotonic()
     try:
@@ -107,7 +107,8 @@ def cmd_leer(args, cfg) -> int:
             time.sleep(min(2.0, max(0.1, args.segundos - (time.monotonic() - inicio))))
             e = captura.estadisticas()
             print(f"[{_hora()}] {info.label}: {e['cuadros']} cuadros, {e['fps']} fps, {e['ancho']}x{e['alto']}"
-                  + (f", error: {e['error']}" if e["error"] else ""))
+                  + (f", error: {e['error']}" if e["error"] else "")
+                  + (f" | AVISO: {e['aviso']}" if e["aviso"] else ""), flush=True)
     except KeyboardInterrupt:
         pass
     e = captura.estadisticas()
@@ -119,8 +120,10 @@ def cmd_leer(args, cfg) -> int:
             print(f"muestra guardada en {args.guardar}")
     captura.detener()
     captura.join(timeout=3)
-    print(f"\nresultado: {e['cuadros']} cuadros en {duracion:.0f} s, {e['cuadros'] / duracion:.1f} fps de promedio, "
-          f"{e['ancho']}x{e['alto']}, reconexiones: {e['reconexiones']}")
+    print(f"\nresultado: {e['cuadros']} cuadros en {duracion:.0f} s, ahora entrega {e['fps']} fps "
+          f"({e['cuadros'] / duracion:.1f} de promedio contando el arranque), "
+          f"{e['ancho']}x{e['alto']}, reconexiones: {e['reconexiones']}"
+          + (f", la cámara entrega {e['crudos_fps']} cuadros/s (se piden {cfg.fps})" if e["aviso"] else ""))
     return 0 if e["cuadros"] > 0 else 1
 
 
@@ -137,7 +140,7 @@ def _escribir_inventario(inv: Inventario, data_dir: str) -> None:
 
 def cmd_vigilar(args, cfg) -> int:
     inv = Inventario()
-    gestor = GestorCaptura(inv, cfg.assigned, cfg.width, cfg.height, cfg.fps)
+    gestor = GestorCaptura(inv, cfg.assigned, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
     simbolo = {"aparecio": "+ apareció", "desaparecio": "- desapareció", "reaparecio": "+ volvió", "cambio": "~ cambió"}
 
     def al_cambiar(eventos) -> None:
@@ -161,7 +164,8 @@ def cmd_vigilar(args, cfg) -> int:
             gestor.sincronizar()
             for clave, e in gestor.estados().items():
                 print(f"[{_hora()}] leyendo {clave}: {e['fps']} fps, {e['ancho']}x{e['alto']}, edad {e['edad_s']} s"
-                      + (f", error: {e['error']}" if e["error"] else ""), flush=True)
+                      + (f", error: {e['error']}" if e["error"] else "")
+                      + (f" | AVISO: {e['aviso']}" if e["aviso"] else ""), flush=True)
             if args.segundos and time.monotonic() - inicio >= args.segundos:
                 break
     finally:
@@ -185,6 +189,8 @@ def main(argv=None) -> int:
     s.add_argument("fuente", help="identificador completo o una parte del nombre o del identificador")
     s.add_argument("--segundos", type=float, default=10, help="cuánto tiempo leer (por defecto 10)")
     s.add_argument("--guardar", metavar="ARCHIVO.jpg", help="guarda el último cuadro leído (para ver qué ve la cámara)")
+    s.add_argument("--formato", choices=["auto", "mjpg", "yuyv"],
+                   help="formato de píxeles de una cámara USB (por defecto el de capture.pixel_format); prueba yuyv si hay 'Corrupt JPEG data'")
     s.set_defaults(func=cmd_leer)
 
     s = sub.add_parser("vigilar", help="deja el agente corriendo")

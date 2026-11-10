@@ -37,6 +37,7 @@ class Config:
     width: int = 640
     height: int = 480
     fps: int = 15
+    pixel_format: str = "auto"          # auto | MJPG | YUYV (solo cámaras USB)
     assigned: list[str] = field(default_factory=list)
     rtsp: list[EntradaRtsp] = field(default_factory=list)
     data_dir: str = "/data"
@@ -106,6 +107,10 @@ def cargar(ruta: str | None = None) -> Config:
     cfg.width = _numero(cap, "width", cfg.width, 160, 4096, int)
     cfg.height = _numero(cap, "height", cfg.height, 120, 4096, int)
     cfg.fps = _numero(cap, "fps", cfg.fps, 1, 60, int)
+    formato = cap.get("pixel_format", "auto")
+    if not isinstance(formato, str) or formato.strip().lower() not in ("auto", "mjpg", "yuyv"):
+        raise ConfigError("'capture.pixel_format' debe ser auto, mjpg o yuyv")
+    cfg.pixel_format = "auto" if formato.strip().lower() == "auto" else formato.strip().upper()
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):

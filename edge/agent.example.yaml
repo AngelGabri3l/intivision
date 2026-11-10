@@ -9,6 +9,7 @@ capture:                   # cómo se abren las cámaras USB (se ajusta a lo que
   width: 640
   height: 480
   fps: 15
+  pixel_format: auto       # auto | mjpg | yuyv. Si en los registros ves "Corrupt JPEG data", prueba yuyv
 
 # Solo estas fuentes se ABREN y se leen. Las demás únicamente se listan.
 # Usa los identificadores que muestra:  docker compose run --rm agent listar
