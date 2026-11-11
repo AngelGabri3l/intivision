@@ -1,12 +1,14 @@
-"""Comandos del agente:  python -m agent  <listar | leer | probar | enviar-prueba | cola | vigilar>
+"""Comandos del agente:  python -m agent  <listar | leer | motor | detectar | probar | enviar-prueba | cola | vigilar>
 
   listar         detecta las cámaras una vez y las muestra (o las imprime en JSON)
   leer           abre UNA cámara unos segundos y muestra cuántos cuadros por segundo entrega
+  motor          comprueba que el motor de detección funciona y mide cuánto tarda en analizar un cuadro (no necesita cámara)
+  detectar       lee UNA cámara y le aplica el motor SIN servidor: muestra personas, puntaje y nivel (sirve para calibrar)
   probar         comprueba la conexión con el servidor y que el token sea válido (no crea nada)
   enviar-prueba  manda UN evento de prueba con foto al servidor (y, con --dos-veces, lo reenvía para ver que no se duplica)
   cola           muestra los eventos pendientes de enviar (y los que el servidor rechazó)
   vigilar        deja el agente corriendo: detecta las cámaras, manda su inventario al servidor, lee las cámaras que el
-                 administrador le asignó y envía los eventos (guardándolos en una cola si no hay internet)
+                 administrador le asignó, las analiza con el motor y envía los eventos (guardándolos en una cola si no hay internet)
 
 La conexión con el servidor se configura con las variables SERVER_URL y EDGE_TOKEN (en Docker: edge/.env).
 """
@@ -23,12 +25,13 @@ import time
 
 from . import __version__
 from .capture import Captura, GestorCaptura
+from .analizador import Analizador, MotorNoDisponible, SesionCamara, cargar_motor
 from .cliente import ClienteServidor, ErrorTransitorio, NoAutorizado, Rechazado
 from .cola import ColaLocal
 from .config import ConfigError, cargar
 from .config_remota import ConfigRemota, normalizar
 from .enviador import Enviador
-from .evidencia import MAX_BYTES, imagen_de_prueba
+from .evidencia import imagen_de_prueba
 from .inventory import Inventario, Vigilante, sondear_una_vez
 from .latido import Latido
 from .simulador import SimuladorEventos, evento_de_prueba
@@ -159,6 +162,143 @@ def _cliente(cfg):
 def _sin_servidor() -> int:
     print("Falta configurar el servidor: define SERVER_URL y EDGE_TOKEN (en Docker, en edge/.env; mira edge/.env.example).", file=sys.stderr)
     return 2
+
+
+def _version(modulo: str) -> str:
+    try:
+        return getattr(__import__(modulo), "__version__", "?")
+    except Exception:       # noqa: BLE001
+        return "no instalado"
+
+
+def _memoria_mb() -> int:
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for linea in f:
+                if linea.startswith("VmRSS:"):
+                    return int(linea.split()[1]) // 1024
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def tempfile_dir(cfg) -> str:
+    import tempfile
+    os.makedirs(cfg.data_dir, exist_ok=True)
+    return tempfile.mkdtemp(prefix="motor_", dir=cfg.data_dir)
+
+
+def cmd_motor(args, cfg) -> int:
+    """Autodiagnóstico del motor: lo carga, mide cuánto tarda en analizar un cuadro y dice cuántos cuadros por segundo aguanta."""
+    import shutil
+    import cv2
+    import numpy as np
+    inicio = time.perf_counter()
+    try:
+        motor = cargar_motor(cfg.engine_config)
+    except MotorNoDisponible as e:
+        print(f"el motor NO está disponible: {e}", file=sys.stderr)
+        return 5
+    carga = time.perf_counter() - inicio
+    print(f"motor cargado en {carga:.1f} s | python {sys.version.split()[0]}, torch {_version('torch')}, ultralytics {_version('ultralytics')}, "
+          f"opencv {cv2.__version__}, numpy {np.__version__}")
+    print(f"modelos cargados: personas | postura: {'activada' if motor.pose else 'apagada'} | memoria: {_memoria_mb()} MB")
+    rng = np.random.RandomState(0)
+    cuadro = np.clip(np.linspace(0, 255, 640 * 480 * 3).reshape(480, 640, 3) + rng.randint(0, 40, (480, 640, 3)), 0, 255).astype(np.uint8)
+
+    def medir(accion, veces=5):
+        accion()                                    # la primera vez es más lenta (calentamiento): no cuenta
+        tiempos = []
+        for _ in range(veces):
+            t0 = time.perf_counter()
+            accion()
+            tiempos.append((time.perf_counter() - t0) * 1000)
+        return sorted(tiempos)[len(tiempos) // 2]
+
+    ms_personas = medir(lambda: motor.detector.detect(cuadro))
+    ms_pose = medir(lambda: motor.pose.analyze(cuadro)) if motor.pose else 0.0
+    tmp = tempfile_dir(cfg)
+    try:
+        sesion = motor.new_session(tmp)
+        ms_total = medir(lambda: sesion.process(cuadro))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    peor = ms_personas + ms_pose
+    print(f"un cuadro de 640x480 tarda: detectar personas {ms_personas:.0f} ms" + (f" | postura (solo si hay una persona) {ms_pose:.0f} ms" if motor.pose else "")
+          + f" | análisis completo sin personas {ms_total:.0f} ms")
+    print(f"con una persona delante (peor caso): ~{peor:.0f} ms por cuadro, es decir, hasta ~{1000 / max(peor, 1):.1f} cuadros por segundo en total entre todas las cámaras")
+    objetivo = cfg.analysis_fps
+    if peor > 1000 / objetivo:
+        print(f"AVISO: no alcanza para {objetivo:g} cuadros por segundo. Baja analysis.fps en agent.yaml o apaga la postura (pose.enabled: false en ENGINE_CONFIG).")
+    else:
+        print(f"OK: alcanza para {objetivo:g} cuadros por segundo con una cámara; con N cámaras se reparte entre ellas.")
+    print(f"memoria al terminar: {_memoria_mb()} MB")
+    return 0
+
+
+def cmd_detectar(args, cfg) -> int:
+    """Lee una cámara y le aplica el motor, sin servidor: para ver qué detecta y calibrar."""
+    import shutil
+    inv = Inventario()
+    sondear_una_vez(inv, construir_descubridores(cfg, incluir_onvif=False))
+    info, candidatas = _buscar(inv, args.fuente)
+    if info is None:
+        print(f"No encuentro una cámara única para '{args.fuente}'." if candidatas else f"No encuentro '{args.fuente}'.", file=sys.stderr)
+        for f in (candidatas or inv.fuentes()):
+            print(f"  - {f.device_key}   ({f.label})", file=sys.stderr)
+        return 2
+    if not info.uri or info.state != "available":
+        print(f"{info.label}: no se puede leer ahora ({ESTADOS_ES.get(info.state, info.state)}: {info.detail or 'sin detalle'}).", file=sys.stderr)
+        return 1
+    try:
+        motor = cargar_motor(cfg.engine_config)
+    except MotorNoDisponible as e:
+        print(f"el motor NO está disponible: {e}", file=sys.stderr)
+        return 5
+    motor.event_cooldown_s = cfg.analysis_event_cooldown_s
+    destino = args.guardar_eventos or os.path.join(cfg.data_dir, "muestras")
+    os.makedirs(destino, exist_ok=True)
+    tmp = tempfile_dir(cfg)
+    sesion = SesionCamara(motor, tmp)
+    captura = Captura(info, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
+    captura.start()
+    print(f"analizando {info.label} durante {args.segundos:g} s a ~{cfg.analysis_fps:g} cuadros/s (Ctrl+C para parar). Párate frente a la cámara.", flush=True)
+    periodo, inicio, ultimo_cuadro, ultimo_aviso = 1.0 / cfg.analysis_fps, time.monotonic(), None, 0.0
+    analizados, eventos, mejor = 0, 0, "NINGUNO"
+    orden = {"NINGUNO": 0, "BAJO": 1, "MEDIO": 2, "ALTO": 3}
+    try:
+        while time.monotonic() - inicio < args.segundos:
+            t0 = time.monotonic()
+            cuadro, instante = captura.ultimo()
+            if cuadro is not None and instante != ultimo_cuadro:
+                ultimo_cuadro = instante
+                res = sesion.procesar(cuadro)
+                analizados += 1
+                if orden.get(res.get("level"), 0) > orden[mejor]:
+                    mejor = res["level"]
+                ev = res.get("event")
+                if ev:
+                    eventos += 1
+                    origen = os.path.join(tmp, os.path.basename(ev["image"]))
+                    copia = os.path.join(destino, f"{time.strftime('%Y%m%d_%H%M%S')}_{ev['level']}.jpg")
+                    try:
+                        shutil.move(origen, copia)
+                    except OSError:
+                        copia = "(no se pudo guardar la foto)"
+                    print(f"[{_hora()}] *** EVENTO {ev['level']} (puntaje {ev['score']}): {ev['reasons']} -> {copia}", flush=True)
+                if time.monotonic() - ultimo_aviso >= 1.0:
+                    ultimo_aviso = time.monotonic()
+                    print(f"[{_hora()}] personas {res.get('people', 0)} | puntaje {res.get('score', 0)} | nivel {res.get('level')}"
+                          + (f" | {', '.join(res.get('reasons') or [])}" if res.get("reasons") else "") + f" | {sesion.ms_promedio():.0f} ms por cuadro", flush=True)
+            time.sleep(max(0.0, periodo - (time.monotonic() - t0)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        captura.detener()
+        captura.join(timeout=3)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"\nresultado: {analizados} cuadros analizados ({sesion.ms_promedio():.0f} ms de promedio), {eventos} evento(s), nivel más alto: {mejor}")
+    return 0 if analizados else 1
 
 
 def cmd_probar(args, cfg) -> int:
@@ -299,7 +439,7 @@ def cmd_vigilar(args, cfg) -> int:
     # Con servidor, el administrador decide qué cámaras se leen; sin servidor, las de agent.yaml (como en H1).
     gestor = GestorCaptura(inv, [] if cliente else cfg.assigned, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
     simbolo = {"aparecio": "+ apareció", "desaparecio": "- desapareció", "reaparecio": "+ volvió", "cambio": "~ cambió"}
-    cola = remota = latido = enviador = simulador = None
+    cola = remota = latido = enviador = simulador = analizador = None
     if cliente:
         cola = ColaLocal(cfg.data_dir, int(cfg.queue_max_mb * 1e6), cfg.queue_max_age_h * 3600)
 
@@ -312,6 +452,9 @@ def cmd_vigilar(args, cfg) -> int:
         enviador = Enviador(cola, cliente, al_perder_camara=latido.despertar)
         if args.simular_eventos:
             simulador = SimuladorEventos(cola, remota, gestor, enviador, args.simular_eventos, args.nivel_simulado)
+        if cfg.analysis_enabled and not args.sin_deteccion:
+            analizador = Analizador(lambda: cargar_motor(cfg.engine_config), gestor, remota, cola, enviador, os.path.join(cfg.data_dir, "tmp_evidencia"),
+                                    cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s)
 
     def al_cambiar(eventos) -> None:
         for ev in eventos:
@@ -330,12 +473,13 @@ def cmd_vigilar(args, cfg) -> int:
 
     if cliente:
         print(f"agente {__version__} vigilando; servidor {cliente.base_url}; las cámaras las asigna el servidor"
+              + (f"; detección con el motor a ~{cfg.analysis_fps:g} cuadros/s" if analizador else "; SIN detección (solo cámaras)")
               + (f"; eventos de prueba cada {args.simular_eventos:g} s (nivel {args.nivel_simulado})" if simulador else ""), flush=True)
         remota.cargar_copia()
     else:
         print(f"agente {__version__} vigilando SIN servidor (modo local); asignadas: {cfg.assigned or 'ninguna'}", flush=True)
     vigilante.start()
-    for hilo in (enviador, latido, simulador):
+    for hilo in (enviador, latido, simulador, analizador):
         if hilo:
             hilo.start()
     inicio = time.monotonic()
@@ -346,6 +490,13 @@ def cmd_vigilar(args, cfg) -> int:
                 print(f"[{_hora()}] leyendo {clave}: {e['fps']} fps, {e['ancho']}x{e['alto']}, edad {e['edad_s']} s"
                       + (f", error: {e['error']}" if e["error"] else "")
                       + (f" | AVISO: {e['aviso']}" if e["aviso"] else ""), flush=True)
+            if analizador:
+                a = analizador.estado()
+                if a["motor"] == "listo":
+                    print(f"[{_hora()}] análisis: {a['cuadros_por_s']} cuadros/s" + "".join(
+                        f" | {c['nombre']}: nivel {c['nivel']}, {c['personas']} persona(s), {c['ms']} ms, {c['eventos']} evento(s)" for c in a["camaras"]), flush=True)
+                else:
+                    print(f"[{_hora()}] análisis: motor {a['motor']}" + (f" ({a['motivo']})" if a["motivo"] else ""), flush=True)
             if cliente:
                 q, en = cola.estadisticas(), enviador.estado()
                 print(f"[{_hora()}] servidor: cola {q['pendientes']}, enviados {en['enviados']}, fallos seguidos {en['fallos_seguidos']}, "
@@ -355,11 +506,11 @@ def cmd_vigilar(args, cfg) -> int:
                 break
     finally:
         vigilante.detener()
-        for hilo in (simulador, latido, enviador):
+        for hilo in (analizador, simulador, latido, enviador):
             if hilo:
                 hilo.detener()
-        for hilo in (simulador, latido, enviador):
-            if hilo:
+        for hilo in (analizador, simulador, latido, enviador):
+            if hilo and hilo.is_alive():
                 hilo.join(timeout=5)
         gestor.detener_todo()
         if cola:
@@ -405,6 +556,15 @@ def main(argv=None) -> int:
                    help="formato de píxeles de una cámara USB (por defecto el de capture.pixel_format); prueba yuyv si hay 'Corrupt JPEG data'")
     s.set_defaults(func=cmd_leer)
 
+    s = sub.add_parser("motor", help="comprueba el motor de detección y mide cuánto tarda en analizar un cuadro")
+    s.set_defaults(func=cmd_motor)
+
+    s = sub.add_parser("detectar", help="lee una cámara y le aplica el motor, sin servidor (para calibrar)")
+    s.add_argument("fuente", help="identificador completo o una parte del nombre o del identificador")
+    s.add_argument("--segundos", type=float, default=30, help="cuánto tiempo analizar (por defecto 30)")
+    s.add_argument("--guardar-eventos", metavar="CARPETA", help="dónde guardar la foto de cada evento (por defecto, muestras/ dentro de data/)")
+    s.set_defaults(func=cmd_detectar)
+
     s = sub.add_parser("probar", help="comprueba la conexión con el servidor y el token (no crea nada)")
     s.add_argument("--inventario", action="store_true", help="además manda el inventario de cámaras de este equipo")
     s.set_defaults(func=cmd_probar)
@@ -429,6 +589,7 @@ def main(argv=None) -> int:
                    help="cada tantos segundos crea un evento de prueba por cada cámara asignada (para probar la cola y el envío)")
     s.add_argument("--nivel-simulado", choices=["BAJO", "MEDIO", "ALTO"], default="BAJO",
                    help="nivel de los eventos de prueba (BAJO no manda aviso por Telegram)")
+    s.add_argument("--sin-deteccion", action="store_true", help="no carga el motor: el agente solo lee cámaras y manda inventario (modo solo cámaras)")
     s.set_defaults(func=cmd_vigilar)
 
     args = p.parse_args(argv)
