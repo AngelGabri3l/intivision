@@ -1,7 +1,9 @@
-# Agente de la mini PC. Requiere Linux (Ubuntu Server) con Docker Engine.
+# Agente de la mini PC. Requiere Linux (Ubuntu Server) con Docker Engine y el plugin Compose v2.
 #   cd edge
+#   cp .env.example .env && nano .env         # SERVER_URL y EDGE_TOKEN (el token lo da el administrador; NO se sube a git)
 #   cp agent.example.yaml data/agent.yaml     # opcional: sin él se usan los valores por defecto
 #   docker compose run --rm agent listar      # muestra las cámaras detectadas
+#   docker compose run --rm agent probar      # comprueba la conexión con el servidor y el token
 #   docker compose up -d                      # deja el agente vigilando
 services:
   agent:
@@ -10,10 +12,13 @@ services:
       context: ..
       dockerfile: edge/Dockerfile
     restart: unless-stopped
-    network_mode: host          # necesario para descubrir cámaras ONVIF (multicast)
+    network_mode: host          # necesario para descubrir cámaras ONVIF (multicast); y permite usar un túnel SSH en localhost
+    env_file:
+      - path: .env              # SERVER_URL y EDGE_TOKEN; si el archivo no existe, el agente corre en modo local (sin servidor)
+        required: false
     volumes:
       - /dev:/dev               # ve las cámaras USB, también las que se conecten después
-      - ./data:/data            # configuración, inventario y muestras
+      - ./data:/data            # configuración, inventario, cola de eventos y muestras
     device_cgroup_rules:
       - 'c 81:* rmw'            # permite usar cualquier dispositivo de video de Linux (V4L2)
     environment:

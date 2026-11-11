@@ -1,9 +1,17 @@
 # Configuración del agente. Cópialo a edge/data/agent.yaml (ese archivo NO se sube a git:
 # puede llevar contraseñas de cámaras; en la mini PC, protégelo con: chmod 600 data/agent.yaml).
+#
+# La conexión con el servidor (SERVER_URL y EDGE_TOKEN) NO va aquí: va en edge/.env.
 
 poll_seconds: 5            # cada cuántos segundos se buscan cámaras USB (conexión en caliente)
 onvif_enabled: true        # descubrir cámaras ONVIF en la red
 onvif_poll_seconds: 60     # cada cuántos segundos se repite el descubrimiento ONVIF
+
+heartbeat_seconds: 30      # cada cuántos segundos manda su inventario al servidor y le pide su configuración
+
+queue:                     # eventos que no se pudieron enviar (sin internet): se guardan en disco y se envían en orden al volver
+  max_mb: 200              # tope de tamaño; si se pasa, se descarta lo más viejo
+  max_age_h: 24            # tope de antigüedad
 
 capture:                   # cómo se abren las cámaras USB (se ajusta a lo que cada cámara admita)
   width: 640
@@ -11,8 +19,8 @@ capture:                   # cómo se abren las cámaras USB (se ajusta a lo que
   fps: 15
   pixel_format: auto       # auto | mjpg | yuyv. Si en los registros ves "Corrupt JPEG data", prueba yuyv
 
-# Solo estas fuentes se ABREN y se leen. Las demás únicamente se listan.
-# Usa los identificadores que muestra:  docker compose run --rm agent listar
+# SOLO se usa si NO hay servidor configurado (modo local, para probar cámaras). Con servidor, el administrador
+# decide qué cámaras se leen asignándolas desde el panel, y esta lista se ignora.
 assigned:
   - usb:/dev/v4l/by-id/usb-EJEMPLO_Camara_USB-video-index0
   - rtsp:puerta
