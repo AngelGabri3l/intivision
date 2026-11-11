@@ -2,6 +2,13 @@
 # Lista blanca: se excluye todo salvo lo que el Dockerfile copia (así no entra ningún .env ni dato).
 **
 !edge/requirements.txt
+!edge/requirements-motor.txt
 !edge/agent
+!engine.py
+!detector.py
+!pose_detector.py
+!threat_scoring.py
+!confirmation.py
+!config.yaml
 **/__pycache__
 **/*.pyc

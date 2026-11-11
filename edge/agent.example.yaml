@@ -9,6 +9,12 @@ onvif_poll_seconds: 60     # cada cuántos segundos se repite el descubrimiento 
 
 heartbeat_seconds: 30      # cada cuántos segundos manda su inventario al servidor y le pide su configuración
 
+analysis:                  # la detección con el motor (necesita la imagen construida con MOTOR=1)
+  enabled: true            # false = solo cámaras: lee, manda inventario y recibe configuración, pero no analiza
+  fps: 3                   # cuadros por segundo que se intenta analizar por cámara (si el equipo no alcanza, se analizan menos)
+  event_cooldown_s: 10     # tiempo mínimo entre dos eventos de una misma cámara (el servidor, además, limita los avisos por Telegram)
+  max_gap_s: 10            # si una cámara estuvo sin cuadros más de esto, se reinicia su análisis (no se arrastra el merodeo)
+
 queue:                     # eventos que no se pudieron enviar (sin internet): se guardan en disco y se envían en orden al volver
   max_mb: 200              # tope de tamaño; si se pasa, se descarta lo más viejo
   max_age_h: 24            # tope de antigüedad

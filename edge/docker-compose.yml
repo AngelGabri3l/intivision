@@ -4,6 +4,7 @@
 #   cp agent.example.yaml data/agent.yaml     # opcional: sin él se usan los valores por defecto
 #   docker compose run --rm agent listar      # muestra las cámaras detectadas
 #   docker compose run --rm agent probar      # comprueba la conexión con el servidor y el token
+#   docker compose run --rm agent motor       # comprueba el motor de detección y mide su velocidad
 #   docker compose up -d                      # deja el agente vigilando
 services:
   agent:
@@ -11,6 +12,8 @@ services:
     build:
       context: ..
       dockerfile: edge/Dockerfile
+      args:
+        MOTOR: ${MOTOR:-1}      # 0 = imagen liviana, sin detección (solo cámaras)
     restart: unless-stopped
     network_mode: host          # necesario para descubrir cámaras ONVIF (multicast); y permite usar un túnel SSH en localhost
     env_file:
@@ -23,6 +26,7 @@ services:
       - 'c 81:* rmw'            # permite usar cualquier dispositivo de video de Linux (V4L2)
     environment:
       - AGENT_CONFIG=/data/agent.yaml
+      - TZ=${AGENT_TZ:-America/Lima}    # la hora local: el horario sensible (22 a 6 h) se mide con ella
     logging:
       driver: json-file
       options:
