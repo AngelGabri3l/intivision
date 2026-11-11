@@ -18,7 +18,7 @@ import time
 
 import psycopg2.errors
 
-from backend import db, telegram_api
+from backend import camera_watch, db, telegram_api
 
 log = logging.getLogger("alerts")
 
@@ -399,13 +399,23 @@ def worker_forever(stop):
         stop.wait(2)
 
 
+def _send_text(chat_id, text):
+    _client.send_message(chat_id, text)
+
+
+def camera_watch_forever(stop):
+    """Revisa cada minuto si alguna cámara perdió señal (H4) y avisa por Telegram."""
+    camera_watch.run_forever(stop, _send_text)
+
+
 def start(polling=True):
-    """Arranca los hilos: la cola de envíos y, si se pide, el sondeo del bot."""
+    """Arranca los hilos: la cola de envíos, el aviso de cámaras sin señal y, si se pide, el sondeo del bot."""
     if not available():
         log.warning("Telegram sin configurar (falta TELEGRAM_TOKEN): no habrá alertas por Telegram.")
         return
     _stop.clear()
-    for nombre, destino in (("alertas-cola", worker_forever), ("alertas-sondeo", poll_forever if polling else None)):
+    for nombre, destino in (("alertas-cola", worker_forever), ("alertas-camaras", camera_watch_forever),
+                            ("alertas-sondeo", poll_forever if polling else None)):
         if destino:
             t = threading.Thread(target=destino, args=(_stop,), name=nombre, daemon=True)
             t.start()
