@@ -123,6 +123,29 @@ CREATE TABLE edge_devices (
     CONSTRAINT ux_edge_id_community UNIQUE (id, community_id)
 );
 
+-- Las cámaras tal como las ve cada mini PC (USB, IP, ONVIF). El administrador las asigna a un vecino o a una
+-- zona común: al asignar se crea la fila de cameras que apunta aquí con source_id. (Migración 001, H4.)
+CREATE TABLE camera_sources (
+    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    community_id   uuid        NOT NULL,
+    edge_device_id uuid        NOT NULL,
+    device_key     text        NOT NULL CHECK (char_length(device_key) BETWEEN 1 AND 300),
+    kind           text        NOT NULL CHECK (kind IN ('usb', 'rtsp', 'onvif')),
+    label          text        NOT NULL CHECK (char_length(label) BETWEEN 1 AND 200),
+    state          text        NOT NULL CHECK (state IN ('available', 'disconnected', 'error')),
+    caps           jsonb       NOT NULL DEFAULT '{}'::jsonb,   -- solo formatos y resolución máxima
+    address        text,                                       -- IP o nombre del equipo (nunca una URL)
+    detail         text,
+    first_seen_at  timestamptz NOT NULL DEFAULT now(),
+    last_seen_at   timestamptz,                                -- la última vez que la mini PC la vio disponible
+    reported_at    timestamptz NOT NULL DEFAULT now(),         -- el último inventario que la mencionó
+    UNIQUE (edge_device_id, device_key),
+    CONSTRAINT ux_sources_id_community UNIQUE (id, community_id),
+    FOREIGN KEY (edge_device_id, community_id)
+        REFERENCES edge_devices (id, community_id) ON DELETE CASCADE
+);
+CREATE INDEX ix_sources_edge ON camera_sources (edge_device_id);
+
 CREATE TABLE cameras (
     id                uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     community_id      uuid        NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
@@ -139,15 +162,21 @@ CREATE TABLE cameras (
     is_active         boolean     NOT NULL DEFAULT true,
     last_seen_at      timestamptz,
     created_at        timestamptz NOT NULL DEFAULT now(),
+    source_id           uuid,                   -- la fuente de la mini PC de la que viene (H4)
+    offline_notified_at timestamptz,            -- cuándo se avisó de que dejó de dar señal (H4)
     UNIQUE (community_id, name),
     CONSTRAINT ux_cameras_id_community UNIQUE (id, community_id),
+    CONSTRAINT ux_cameras_source UNIQUE (source_id),
     CHECK ((kind = 'private' AND user_id IS NOT NULL) OR (kind = 'common' AND user_id IS NULL)),
     FOREIGN KEY (user_id, community_id)
         REFERENCES users (id, community_id) ON DELETE CASCADE,
     FOREIGN KEY (edge_device_id, community_id)
-        REFERENCES edge_devices (id, community_id) ON DELETE SET NULL (edge_device_id)
+        REFERENCES edge_devices (id, community_id) ON DELETE SET NULL (edge_device_id),
+    CONSTRAINT fk_cameras_source FOREIGN KEY (source_id, community_id)
+        REFERENCES camera_sources (id, community_id) ON DELETE SET NULL (source_id)
 );
 CREATE INDEX ix_cameras_user ON cameras (user_id);
+CREATE INDEX ix_cameras_watch ON cameras (last_seen_at) WHERE is_active AND edge_device_id IS NOT NULL;
 
 
 CREATE TABLE events (
@@ -165,11 +194,15 @@ CREATE TABLE events (
     video_time_s numeric(10,2),
     occurred_at  timestamptz NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
+    reviewed_by  uuid,                          -- quién revisó el evento (H6)
+    reviewed_at  timestamptz,
     CONSTRAINT ux_events_id_community UNIQUE (id, community_id),
     FOREIGN KEY (user_id, community_id)
         REFERENCES users (id, community_id) ON DELETE CASCADE,
     FOREIGN KEY (camera_id, community_id)
-        REFERENCES cameras (id, community_id) ON DELETE SET NULL (camera_id)
+        REFERENCES cameras (id, community_id) ON DELETE SET NULL (camera_id),
+    CONSTRAINT fk_events_reviewed_by FOREIGN KEY (reviewed_by, community_id)
+        REFERENCES users (id, community_id) ON DELETE SET NULL (reviewed_by)
 );
 CREATE INDEX ix_events_community_time ON events (community_id, occurred_at DESC);
 CREATE INDEX ix_events_user_time      ON events (user_id, occurred_at DESC);
