@@ -196,6 +196,7 @@ CREATE TABLE events (
     created_at   timestamptz NOT NULL DEFAULT now(),
     reviewed_by  uuid,                          -- quién revisó el evento (H6)
     reviewed_at  timestamptz,
+    edge_event_id uuid,                         -- el id que le pone la mini PC: evita duplicados al reenviar (H2)
     CONSTRAINT ux_events_id_community UNIQUE (id, community_id),
     FOREIGN KEY (user_id, community_id)
         REFERENCES users (id, community_id) ON DELETE CASCADE,
@@ -207,6 +208,7 @@ CREATE TABLE events (
 CREATE INDEX ix_events_community_time ON events (community_id, occurred_at DESC);
 CREATE INDEX ix_events_user_time      ON events (user_id, occurred_at DESC);
 CREATE INDEX ix_events_camera_time    ON events (camera_id, occurred_at DESC);
+CREATE UNIQUE INDEX ux_events_edge_event ON events (community_id, edge_event_id) WHERE edge_event_id IS NOT NULL;
 
 CREATE TABLE media_files (
     id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
