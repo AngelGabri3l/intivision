@@ -211,28 +211,49 @@ class GestorCaptura:
         self._formato = formato
         self._abrir = abrir
         self._capturas: dict[str, Captura] = {}
+        self._lock = threading.RLock()      # lo llaman el vigilante, la configuración remota y el bucle principal
+
+    def set_asignadas(self, claves: list[str]) -> None:
+        """Cambia qué cámaras se leen (lo decide el servidor). Se aplica en la siguiente sincronización."""
+        with self._lock:
+            self.asignadas = list(dict.fromkeys(claves))
 
     def sincronizar(self) -> None:
-        for clave in self.asignadas:
-            info = self.inventario.fuente(clave)
-            debe = bool(info and info.state == "available" and info.uri)
-            if debe and clave not in self._capturas:
-                c = Captura(info, *self._cfg, abrir=self._abrir, formato=self._formato)
-                self._capturas[clave] = c
-                c.start()
-            elif not debe and clave in self._capturas:
+        with self._lock:
+            asignadas = list(self.asignadas)
+            for clave in asignadas:
+                info = self.inventario.fuente(clave)
+                debe = bool(info and info.state == "available" and info.uri)
+                if debe and clave not in self._capturas:
+                    c = Captura(info, *self._cfg, abrir=self._abrir, formato=self._formato)
+                    self._capturas[clave] = c
+                    c.start()
+                elif not debe and clave in self._capturas:
+                    self._capturas.pop(clave).detener()
+                    log.info("se detuvo la lectura de %s (ya no está disponible)", clave)
+            for clave in [k for k in self._capturas if k not in asignadas]:
                 self._capturas.pop(clave).detener()
-                log.info("se detuvo la lectura de %s (ya no está disponible)", clave)
+                log.info("se detuvo la lectura de %s (ya no está asignada)", clave)
+
+    def ultimo(self, clave: str):
+        """(cuadro, instante) del último cuadro de esa cámara, o (None, 0) si no se está leyendo."""
+        with self._lock:
+            c = self._capturas.get(clave)
+        return c.ultimo() if c else (None, 0.0)
 
     def estados(self) -> dict[str, dict]:
-        return {clave: c.estadisticas() for clave, c in self._capturas.items()}
+        with self._lock:
+            return {clave: c.estadisticas() for clave, c in self._capturas.items()}
 
     def abiertas(self) -> list[str]:
-        return list(self._capturas)
+        with self._lock:
+            return list(self._capturas)
 
     def detener_todo(self) -> None:
-        for c in self._capturas.values():
+        with self._lock:
+            capturas = list(self._capturas.values())
+            self._capturas.clear()
+        for c in capturas:
             c.detener()
-        for c in self._capturas.values():
+        for c in capturas:
             c.join(timeout=3)
-        self._capturas.clear()
