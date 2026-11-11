@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -21,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db, auth, cameras, pages, alerts  # noqa: E402
+from backend import db, auth, cameras, pages, alerts, sources  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -642,6 +643,90 @@ async def ingest(request: Request):
         camera_id = camara["id"]
     await asyncio.to_thread(insert_event, limpio, None, edge["community_id"], "edge", camera_id)
     return {"ok": True}
+
+
+# ---------------------- fuentes de cámara (H4) ----------------------
+
+def _bearer(request: Request):
+    header = request.headers.get("authorization", "")
+    return header[7:].strip() if header.lower().startswith("bearer ") else None
+
+
+async def _read_limited(request: Request, limit: int):
+    """El cuerpo de la petición, o None si pasa del límite (se corta sin leerlo completo)."""
+    try:
+        if int(request.headers.get("content-length", "0")) > limit:
+            return None
+    except ValueError:
+        pass
+    cuerpo = bytearray()
+    async for trozo in request.stream():
+        cuerpo += trozo
+        if len(cuerpo) > limit:
+            return None
+    return bytes(cuerpo)
+
+
+@app.post("/edge/inventory")
+async def edge_inventory(request: Request):
+    """La mini PC reporta las cámaras que ve. Se identifica con 'Authorization: Bearer <token>'."""
+    edge = await asyncio.to_thread(auth.edge_from_token, _bearer(request))
+    if edge is None:
+        return JSONResponse(status_code=401, content={"error": "Token de la mini PC inválido."})
+    cuerpo = await _read_limited(request, sources.MAX_BODY_BYTES)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "El inventario es demasiado grande."})
+    try:
+        payload = json.loads(cuerpo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
+    limpio, motivo = sources.validate_inventory(payload)
+    if motivo:
+        return JSONResponse(status_code=422, content={"error": motivo})
+    resultado = await asyncio.to_thread(sources.upsert_inventory, edge, limpio)
+    return {"ok": True, **resultado}
+
+
+@app.get("/edge/config")
+async def edge_config(request: Request):
+    """La configuración de la mini PC: solo sus cámaras asignadas, el horario sensible y las zonas."""
+    edge = await asyncio.to_thread(auth.edge_from_token, _bearer(request))
+    if edge is None:
+        return JSONResponse(status_code=401, content={"error": "Token de la mini PC inválido."})
+    return await asyncio.to_thread(sources.edge_config, edge)
+
+
+@app.get("/admin/sources")
+def admin_sources(user: dict = Depends(auth.require_admin)):
+    return {"sources": sources.list_sources(user)}
+
+
+async def _assign(request: Request, source_id: str, user: dict, reassign: bool):
+    cuerpo = await _read_limited(request, 10_000)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "La solicitud es demasiado grande."})
+    try:
+        datos = json.loads(cuerpo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
+    try:
+        resultado = await asyncio.to_thread(sources.assign_source, user, source_id, datos, reassign,
+                                            auth._clean_ip(auth.client_ip(request)))
+    except sources.AssignError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    return JSONResponse(status_code=201, content=resultado)
+
+
+@app.post("/admin/sources/{source_id}/assign")
+async def admin_assign_source(source_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """Convierte una fuente en una cámara de un vecino o de una zona común. Una fuente ya asignada responde 409."""
+    return await _assign(request, source_id, user, reassign=False)
+
+
+@app.post("/admin/sources/{source_id}/reassign")
+async def admin_reassign_source(source_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """Cambia la asignación: archiva la cámara anterior (sin borrar sus eventos) y crea la nueva."""
+    return await _assign(request, source_id, user, reassign=True)
 
 
 @app.get("/events")
