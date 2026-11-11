@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db, auth, cameras, pages, alerts, sources  # noqa: E402
+from backend import db, auth, cameras, pages, alerts, sources, ingest_media  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,6 +81,31 @@ def clean_filename(name):
     return base[-MAX_LABEL_CHARS:]                          # se conserva el final para no perder la extensión
 
 
+EVENT_MAX_AGE = datetime.timedelta(hours=48)       # un evento más viejo que esto se guarda con la hora del servidor
+EVENT_MAX_AHEAD = datetime.timedelta(minutes=5)    # y uno «del futuro» también (el reloj de la mini PC está mal)
+
+
+def parse_event_time(valor):
+    """
+    La hora del evento según la mini PC (ISO 8601). Devuelve (fecha_y_hora_UTC | None, motivo | None).
+    Si no viene, o viene fuera de [ahora - 48 h, ahora + 5 min], devuelve None: se usará la hora del servidor.
+    """
+    if valor is None:
+        return None, None
+    if not isinstance(valor, str) or len(valor) > 40:
+        return None, "occurred_at debe ser una fecha y hora ISO 8601."
+    try:
+        momento = datetime.datetime.fromisoformat(valor.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None, "occurred_at debe ser una fecha y hora ISO 8601."
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=datetime.timezone.utc)
+    ahora = datetime.datetime.now(datetime.timezone.utc)
+    if momento > ahora + EVENT_MAX_AHEAD or momento < ahora - EVENT_MAX_AGE:
+        return None, None
+    return momento.astimezone(datetime.timezone.utc), None
+
+
 def validate_event(e):
     """Revisa un evento recibido de otro equipo. Devuelve (evento_limpio, None) o (None, motivo)."""
     if not isinstance(e, dict):
@@ -109,6 +134,14 @@ def validate_event(e):
     if camara is not None and not cameras.is_uuid(camara):
         return None, "camera_id no es un identificador válido."
     out["camera_id"] = camara
+    edge_id = e.get("edge_event_id")
+    if edge_id is not None and not cameras.is_uuid(edge_id):
+        return None, "edge_event_id no es un identificador válido."
+    out["edge_event_id"] = edge_id.lower() if edge_id else None
+    momento, motivo = parse_event_time(e.get("occurred_at"))
+    if motivo:
+        return None, motivo
+    out["occurred_at"] = momento
     return out, None
 
 
@@ -219,23 +252,38 @@ def parse_reasons(reasons):
     return out
 
 
-def insert_event(e, user=None, community_id=None, source_kind="browser", camera_id=None, notify=True):
+def insert_event(e, user=None, community_id=None, source_kind="browser", camera_id=None, notify=True,
+                 occurred_at=None, edge_event_id=None):
     """
     Guarda un evento con sus motivos (event_signals) y su imagen (media_files). Si viene `user`,
     el evento es de ese usuario y de su comunidad; si no (mini PC), solo de la comunidad.
     Si es MEDIO o ALTO y `notify`, deja en la cola los avisos por Telegram de quien corresponda.
+
+    `occurred_at`: la hora del evento (si no viene, la del servidor).
+    `edge_event_id`: el identificador que le pone la mini PC. Si ya existe un evento con ese identificador en la
+    comunidad, no se guarda nada (ni motivos, ni imagen, ni avisos) y devuelve None: es un reenvío.
     """
     owner = user["id"] if user else None
     community = user["community_id"] if user else community_id
     image = os.path.basename(e["image"]) if e.get("image") else None
+    columnas, extra, conflicto = "", "", ""
+    valores = [community, owner, camera_id, source_kind, e.get("level"), int(e.get("score") or 0),
+               int(e.get("people") or 0), e.get("status", "sin verificar"), e.get("video_time_s"), occurred_at]
+    if edge_event_id:
+        # Solo los eventos de una mini PC usan esta columna y este índice: el resto de los flujos no dependen de ellos.
+        columnas, extra = ", edge_event_id", ", %s"
+        conflicto = " ON CONFLICT (community_id, edge_event_id) WHERE edge_event_id IS NOT NULL DO NOTHING"
+        valores.append(edge_event_id)
     with db.cursor() as cur:
         cur.execute(
-            """INSERT INTO events (community_id, user_id, camera_id, source, level, score,
-                                   people_count, status, video_time_s, occurred_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, now()) RETURNING id""",
-            (community, owner, camera_id, source_kind, e.get("level"), int(e.get("score") or 0),
-             int(e.get("people") or 0), e.get("status", "sin verificar"), e.get("video_time_s")))
-        event_id = cur.fetchone()["id"]
+            f"""INSERT INTO events (community_id, user_id, camera_id, source, level, score,
+                                    people_count, status, video_time_s, occurred_at{columnas})
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, COALESCE(%s, now()){extra}){conflicto} RETURNING id""",
+            valores)
+        fila = cur.fetchone()
+        if fila is None:
+            return None
+        event_id = fila["id"]
         for code, detail in parse_reasons(e.get("reasons")):
             cur.execute("""INSERT INTO event_signals (event_id, signal_code, detail)
                            VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""", (event_id, code, detail))
@@ -615,34 +663,117 @@ async def analyze(video: UploadFile = File(...), camera: str = Form(""), user: d
             pass
 
 
+INGEST_MAX_JSON = 100_000                                           # evento sin foto
+INGEST_MAX_FORM = ingest_media.MAX_PHOTO_BYTES + 150_000            # foto + evento + estructura del formulario
+
+
+def _replay(cuerpo: bytes):
+    """Una función `receive` que entrega un cuerpo que ya leímos, para poder analizarlo como formulario."""
+    enviado = False
+
+    async def receive():
+        nonlocal enviado
+        if enviado:
+            return {"type": "http.disconnect"}
+        enviado = True
+        return {"type": "http.request", "body": cuerpo, "more_body": False}
+
+    return receive
+
+
+def _edge_event_id_of(community_id, edge_event_id):
+    with db.cursor() as cur:
+        cur.execute("SELECT id FROM events WHERE community_id = %s AND edge_event_id = %s",
+                    (community_id, edge_event_id))
+        fila = cur.fetchone()
+    return fila["id"] if fila else None
+
+
 @app.post("/ingest")
 async def ingest(request: Request):
-    """Recibe un evento de una mini PC. Se identifica con 'Authorization: Bearer <token>'."""
+    """
+    Recibe un evento de una mini PC. Se identifica con 'Authorization: Bearer <token>'.
+
+    Dos formas de enviarlo:
+      • application/json: el evento solo (como siempre).
+      • multipart/form-data: el campo «evento» (el mismo JSON) y el campo «foto» (un JPEG de hasta 500 KB).
+        El nombre de la foto lo pone el servidor.
+    Si el evento trae edge_event_id y ya existe, responde 200 con duplicate=true y no guarda nada más.
+    """
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else None
     edge = await asyncio.to_thread(auth.edge_from_token, token)
     if edge is None:
         return JSONResponse(status_code=401, content={"error": "Token de la mini PC inválido."})
+    es_formulario = request.headers.get("content-type", "").lower().startswith("multipart/form-data")
+    cuerpo = await _read_limited(request, INGEST_MAX_FORM if es_formulario else INGEST_MAX_JSON)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "El evento o la foto es demasiado grande."})
+
+    foto = None
+    if es_formulario:
+        try:
+            formulario = await Request(request.scope, _replay(cuerpo)).form()
+        except Exception:                                              # noqa: BLE001
+            return JSONResponse(status_code=400, content={"error": "El formulario no es válido."})
+        try:
+            crudo = formulario.get("evento")
+            if crudo is not None and not isinstance(crudo, str):       # llegó como archivo
+                crudo = (await crudo.read()).decode("utf-8", "replace")
+            archivo = formulario.get("foto")
+            if archivo is not None:
+                if isinstance(archivo, str):
+                    return JSONResponse(status_code=415, content={"error": "La foto debe enviarse como archivo."})
+                foto = await archivo.read()
+        finally:
+            await formulario.close()
+        if crudo is None:
+            return JSONResponse(status_code=422, content={"error": "Falta el campo «evento»."})
+    else:
+        crudo = cuerpo.decode("utf-8", "replace")
     try:
-        if int(request.headers.get("content-length", "0")) > 100_000:
-            return JSONResponse(status_code=413, content={"error": "El evento es demasiado grande."})
-    except ValueError:
-        pass
-    try:
-        e = await request.json()
+        e = json.loads(crudo)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
+    if es_formulario and isinstance(e, dict):
+        e.pop("image", None)                                           # el nombre de la foto lo pone el servidor
     limpio, motivo = validate_event(e)
     if motivo:
         return JSONResponse(status_code=422, content={"error": motivo})
+    if foto is not None:
+        try:
+            await asyncio.to_thread(ingest_media.validate_photo, foto)
+        except ingest_media.PhotoError as ex:
+            return JSONResponse(status_code=ex.status, content={"error": ex.message})
     camera_id = None
     if limpio.get("camera_id"):
         camara = await asyncio.to_thread(cameras.edge_camera, edge, limpio["camera_id"])
         if camara is None:
             return JSONResponse(status_code=422, content={"error": "Esa cámara no está asignada a este equipo."})
         camera_id = camara["id"]
-    await asyncio.to_thread(insert_event, limpio, None, edge["community_id"], "edge", camera_id)
-    return {"ok": True}
+    edge_event_id = limpio.get("edge_event_id")
+    if edge_event_id:                                                  # un reenvío: no se escribe la foto de nuevo
+        existente = await asyncio.to_thread(_edge_event_id_of, edge["community_id"], edge_event_id)
+        if existente:
+            return {"ok": True, "event_id": existente, "duplicate": True}
+    nombre = None
+    if foto is not None:
+        nombre = await asyncio.to_thread(ingest_media.save_photo, foto, EVIDENCE_DIR)
+        limpio["image"] = nombre
+    try:
+        event_id = await asyncio.to_thread(
+            insert_event, limpio, None, edge["community_id"], "edge", camera_id, True,
+            limpio.get("occurred_at"), edge_event_id)
+    except BaseException:
+        if nombre:
+            ingest_media.remove_photo(EVIDENCE_DIR, nombre)            # no queda una foto sin evento
+        raise
+    if event_id is None:                                               # otro envío igual llegó primero
+        if nombre:
+            ingest_media.remove_photo(EVIDENCE_DIR, nombre)
+        existente = await asyncio.to_thread(_edge_event_id_of, edge["community_id"], edge_event_id)
+        return {"ok": True, "event_id": existente, "duplicate": True}
+    return {"ok": True, "event_id": event_id, "duplicate": False}
 
 
 # ---------------------- fuentes de cámara (H4) ----------------------
