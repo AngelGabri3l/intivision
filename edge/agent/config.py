@@ -2,6 +2,9 @@
 
 Si el archivo no existe se usan los valores por defecto, para que `listar` funcione
 sin configurar nada.
+
+La conexión con el servidor NO va en el archivo: SERVER_URL y EDGE_TOKEN se leen del entorno (edge/.env en Docker),
+para que el token no quede en un archivo que alguien pueda subir a git o compartir por error.
 """
 from __future__ import annotations
 
@@ -16,6 +19,8 @@ import yaml
 log = logging.getLogger("agent.config")
 
 NOMBRE_RTSP = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,100}$")
+HOSTS_LOCALES = ("localhost", "127.0.0.1", "::1")
 RUTA_POR_DEFECTO = "/data/agent.yaml"
 
 
@@ -41,6 +46,47 @@ class Config:
     assigned: list[str] = field(default_factory=list)
     rtsp: list[EntradaRtsp] = field(default_factory=list)
     data_dir: str = "/data"
+    heartbeat_seconds: float = 30.0     # cada cuánto manda su inventario y pide su configuración
+    queue_max_mb: float = 200.0         # tope de la cola de eventos pendientes
+    queue_max_age_h: float = 24.0       # y de su antigüedad
+    server_url: str | None = None       # variable SERVER_URL
+    edge_token: str | None = field(default=None, repr=False)    # variable EDGE_TOKEN: nunca se imprime
+
+    def servidor(self):
+        """(url, token) listos para usar, None si no se configuró el servidor, o ConfigError si está a medias o mal."""
+        url, token = self.server_url, self.edge_token
+        if not url and not token:
+            return None
+        if not url:
+            raise ConfigError("falta SERVER_URL (EDGE_TOKEN sí está definido)")
+        if not token:
+            raise ConfigError("falta EDGE_TOKEN (SERVER_URL sí está definido)")
+        if not TOKEN_RE.match(token):
+            raise ConfigError("EDGE_TOKEN no tiene el formato esperado (de 20 a 100 letras, números, guion o guion bajo); "
+                              "revisa que no tenga espacios ni comillas")
+        return validar_url_servidor(url), token
+
+
+def validar_url_servidor(url) -> str:
+    """La dirección base del servidor. Solo se acepta http:// hacia este mismo equipo (un túnel SSH): hacia un equipo
+    remoto el token viajaría sin cifrar."""
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError("SERVER_URL está vacía")
+    try:
+        p = urlsplit(url.strip())
+        _ = p.port
+    except ValueError:
+        raise ConfigError("SERVER_URL no es una dirección válida") from None
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise ConfigError("SERVER_URL debe empezar con https:// (o http:// solo para localhost) e incluir el equipo")
+    if p.username or p.password:
+        raise ConfigError("SERVER_URL no debe llevar usuario ni contraseña")
+    if p.query or p.fragment:
+        raise ConfigError("SERVER_URL no debe llevar parámetros")
+    if p.scheme == "http" and p.hostname.lower() not in HOSTS_LOCALES:
+        raise ConfigError("SERVER_URL usa http:// hacia un equipo remoto: el token viajaría sin cifrar. "
+                          "Usa https:// (o un túnel SSH hacia localhost)")
+    return urlunsplit((p.scheme, p.netloc, p.path.rstrip("/"), "", ""))
 
 
 def ocultar_credenciales(url: str) -> str:
@@ -83,6 +129,8 @@ def _validar_url_rtsp(nombre: str, url) -> str:
 def cargar(ruta: str | None = None) -> Config:
     ruta = ruta or os.environ.get("AGENT_CONFIG") or RUTA_POR_DEFECTO
     cfg = Config(data_dir=os.path.dirname(ruta) or ".")
+    cfg.server_url = os.environ.get("SERVER_URL", "").strip() or None
+    cfg.edge_token = os.environ.get("EDGE_TOKEN", "").strip() or None
     if not os.path.exists(ruta):
         log.info("no hay archivo de configuración en %s: se usan los valores por defecto", ruta)
         return cfg
@@ -111,6 +159,13 @@ def cargar(ruta: str | None = None) -> Config:
     if not isinstance(formato, str) or formato.strip().lower() not in ("auto", "mjpg", "yuyv"):
         raise ConfigError("'capture.pixel_format' debe ser auto, mjpg o yuyv")
     cfg.pixel_format = "auto" if formato.strip().lower() == "auto" else formato.strip().upper()
+
+    cfg.heartbeat_seconds = _numero(datos, "heartbeat_seconds", cfg.heartbeat_seconds, 5, 3600)
+    cola = datos.get("queue") or {}
+    if not isinstance(cola, dict):
+        raise ConfigError("'queue' debe ser un diccionario (max_mb, max_age_h)")
+    cfg.queue_max_mb = _numero(cola, "max_mb", cfg.queue_max_mb, 5, 5000)
+    cfg.queue_max_age_h = _numero(cola, "max_age_h", cfg.queue_max_age_h, 1, 720)
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):
