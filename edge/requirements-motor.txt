@@ -1,0 +1,3 @@
+# El motor de detección (se instala solo con MOTOR=1, después de PyTorch para CPU: mira el Dockerfile).
+# La misma versión mínima que usa el servidor (requirements.txt de la raíz).
+ultralytics>=8.3.0

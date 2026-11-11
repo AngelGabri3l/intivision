@@ -49,6 +49,11 @@ class Config:
     heartbeat_seconds: float = 30.0     # cada cuánto manda su inventario y pide su configuración
     queue_max_mb: float = 200.0         # tope de la cola de eventos pendientes
     queue_max_age_h: float = 24.0       # y de su antigüedad
+    analysis_enabled: bool = True       # analizar con el motor las cámaras asignadas
+    analysis_fps: float = 3.0           # cuadros por segundo que se intenta analizar por cámara
+    analysis_event_cooldown_s: float = 10.0   # tiempo mínimo entre eventos de una misma cámara
+    analysis_max_gap_s: float = 10.0    # sin cuadros más de este tiempo: se reinicia el análisis de esa cámara
+    engine_config: str | None = None    # variable ENGINE_CONFIG: otro config.yaml para el motor
     server_url: str | None = None       # variable SERVER_URL
     edge_token: str | None = field(default=None, repr=False)    # variable EDGE_TOKEN: nunca se imprime
 
@@ -131,6 +136,7 @@ def cargar(ruta: str | None = None) -> Config:
     cfg = Config(data_dir=os.path.dirname(ruta) or ".")
     cfg.server_url = os.environ.get("SERVER_URL", "").strip() or None
     cfg.edge_token = os.environ.get("EDGE_TOKEN", "").strip() or None
+    cfg.engine_config = os.environ.get("ENGINE_CONFIG", "").strip() or None
     if not os.path.exists(ruta):
         log.info("no hay archivo de configuración en %s: se usan los valores por defecto", ruta)
         return cfg
@@ -166,6 +172,17 @@ def cargar(ruta: str | None = None) -> Config:
         raise ConfigError("'queue' debe ser un diccionario (max_mb, max_age_h)")
     cfg.queue_max_mb = _numero(cola, "max_mb", cfg.queue_max_mb, 5, 5000)
     cfg.queue_max_age_h = _numero(cola, "max_age_h", cfg.queue_max_age_h, 1, 720)
+
+    an = datos.get("analysis") or {}
+    if not isinstance(an, dict):
+        raise ConfigError("'analysis' debe ser un diccionario (enabled, fps, event_cooldown_s, max_gap_s)")
+    habilitado = an.get("enabled", True)
+    if not isinstance(habilitado, bool):
+        raise ConfigError("'analysis.enabled' debe ser true o false")
+    cfg.analysis_enabled = habilitado
+    cfg.analysis_fps = _numero(an, "fps", cfg.analysis_fps, 0.2, 15)
+    cfg.analysis_event_cooldown_s = _numero(an, "event_cooldown_s", cfg.analysis_event_cooldown_s, 1, 3600)
+    cfg.analysis_max_gap_s = _numero(an, "max_gap_s", cfg.analysis_max_gap_s, 2, 300)
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):
