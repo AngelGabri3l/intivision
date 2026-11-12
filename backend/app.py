@@ -956,6 +956,10 @@ async def _assign(request: Request, source_id: str, user: dict, reassign: bool):
         lugar = f" ({aviso['place']})" if aviso["place"] else ""
         texto = f"VIGÍA: el administrador te asignó la cámara «{aviso['name']}»{lugar}. Ya aparece en tu lista de Cámaras."
         threading.Thread(target=alerts.notify_user, args=(aviso["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
+    anterior = (aviso or {}).get("anterior")      # quien tenía la cámara antes: ya no la ve, así que se le dice (salvo que siga siendo suya)
+    if anterior and anterior["owner_id"] and anterior["owner_id"] != str(user["id"]) and anterior["owner_id"] != aviso["owner_id"]:
+        texto = f"VIGÍA: la cámara «{anterior['name']}» ya no está asignada a ti. Quedó archivada y su historial se conserva."
+        threading.Thread(target=alerts.notify_user, args=(anterior["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     return JSONResponse(status_code=201, content=resultado)
 
 
@@ -978,6 +982,10 @@ async def admin_unassign_source(source_id: str, request: Request, user: dict = D
         resultado = await asyncio.to_thread(sources.unassign_source, user, source_id, auth._clean_ip(auth.client_ip(request)))
     except sources.AssignError as ex:
         return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    aviso = resultado.pop("_aviso", None)
+    if aviso and aviso["owner_id"] and aviso["owner_id"] != str(user["id"]):
+        texto = f"VIGÍA: el administrador quitó la asignación de tu cámara «{aviso['name']}». Quedó archivada y su historial se conserva."
+        threading.Thread(target=alerts.notify_user, args=(aviso["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     return JSONResponse(content=resultado)
 
 

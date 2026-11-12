@@ -313,7 +313,7 @@ def assign_source(admin, source_id, data, reassign=False, ip=None):
             fuente = cur.fetchone()
             if fuente is None:
                 raise AssignError(404, "Esa fuente no existe.", "no_existe")
-            cur.execute("SELECT id::text AS id FROM cameras WHERE source_id = %s FOR UPDATE", (source_id,))
+            cur.execute("SELECT id::text AS id, user_id::text AS user_id, name FROM cameras WHERE source_id = %s FOR UPDATE", (source_id,))
             actual = cur.fetchone()
             if actual and not reassign:
                 raise AssignError(409, "Esa fuente ya está asignada. Usa reasignar para cambiarla.", "ya_asignada")
@@ -353,7 +353,8 @@ def assign_source(admin, source_id, data, reassign=False, ip=None):
         # Respaldo: si dos administradores asignan a la vez, el índice único de source_id deja pasar a uno solo.
         raise AssignError(409, "Esa fuente ya está asignada. Usa reasignar para cambiarla.", "ya_asignada")
     return {"camera_id": nueva["id"], "archived_camera_id": archivada,
-            "_aviso": {"owner_id": datos["owner_id"], "name": datos["name"], "place": datos["place"]}}
+            "_aviso": {"owner_id": datos["owner_id"], "name": datos["name"], "place": datos["place"],
+                       "anterior": {"owner_id": actual["user_id"], "name": actual["name"]} if actual else None}}
 
 
 def unassign_source(admin, source_id, ip=None):
@@ -371,7 +372,7 @@ def unassign_source(admin, source_id, ip=None):
         fuente = cur.fetchone()
         if fuente is None:
             raise AssignError(404, "Esa fuente no existe.", "no_existe")
-        cur.execute("SELECT id::text AS id, user_id::text AS user_id FROM cameras WHERE source_id = %s FOR UPDATE", (source_id,))
+        cur.execute("SELECT id::text AS id, user_id::text AS user_id, name FROM cameras WHERE source_id = %s FOR UPDATE", (source_id,))
         actual = cur.fetchone()
         if actual is None:
             raise AssignError(409, "Esa fuente no está asignada.", "sin_asignar")
@@ -384,7 +385,7 @@ def unassign_source(admin, source_id, ip=None):
                                               entity, entity_id, ip, meta)
                        VALUES ('user', %s, %s, %s, 'unassign_source', 'camera_source', %s, %s, %s::jsonb)""",
                     (admin["id"], admin["community_id"], actual["user_id"], source_id, ip, json.dumps(meta)))
-    return {"archived_camera_id": actual["id"]}
+    return {"archived_camera_id": actual["id"], "_aviso": {"owner_id": actual["user_id"], "name": actual["name"]}}
 
 
 def identify_info(admin, source_id):
