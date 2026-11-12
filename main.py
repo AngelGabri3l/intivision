@@ -60,7 +60,11 @@ def main():
         group_size=sc.get("group_size", 3),
         sensitive_hours=sc.get("sensitive_hours", [22, 6]),
         persistence_frames=sc.get("persistence_frames", 5),
-        window=sc.get("window", 8))
+        window=sc.get("window", 8),
+        loitering_radius_h=sc.get("loitering_radius_h", 0.8),
+        proximity_ratio=sc.get("proximity_ratio", 0.6),
+        proximity_seconds=sc.get("proximity_seconds", 1.5),
+        tracking=sc.get("tracking"))
     zone = sc.get("restricted_zone") or []
 
     actuator = build_actuator(cfg)

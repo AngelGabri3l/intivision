@@ -9,6 +9,7 @@
 !detector.py
 !pose_detector.py
 !threat_scoring.py
+!tracker.py
 !confirmation.py
 !config.yaml
 **/__pycache__

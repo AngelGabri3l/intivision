@@ -17,7 +17,7 @@ from pose_detector import PoseDetector
 from threat_scoring import ThreatScorer
 
 DEFAULT_WEIGHTS = {"person_present": 1, "in_restricted_zone": 3, "sensitive_hour": 2,
-                   "loitering": 2, "group": 2, "climbing": 3, "fallen": 3,
+                   "loitering": 2, "group": 2, "proximity": 1, "climbing": 3, "fallen": 3,
                    "hands_up": 3}
 
 
@@ -42,6 +42,10 @@ class GuardianEngine:
             sensitive_hours=s.get("sensitive_hours", [22, 6]),
             persistence_frames=s.get("persistence_frames", 5),
             window=s.get("window", 8),
+            loitering_radius_h=s.get("loitering_radius_h", 0.8),
+            proximity_ratio=s.get("proximity_ratio", 0.6),
+            proximity_seconds=s.get("proximity_seconds", 1.5),
+            tracking=s.get("tracking"),
         )
         self.scorer = ThreatScorer(**self._scorer_kwargs)
         # Los modelos YOLO se comparten entre clientes: un candado evita inferencias simultaneas.

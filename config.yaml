@@ -16,6 +16,7 @@ scoring:
     sensitive_hour: 2
     loitering: 2
     group: 2
+    proximity: 1      # dos personas muy juntas (cercanía entre personas)
     # postura
     climbing: 3
     fallen: 3
@@ -23,7 +24,19 @@ scoring:
   thresholds:
     medium: 3
     high: 6
+  # Merodeo (por persona): UNA MISMA persona permanece casi en el mismo sitio durante estos segundos, dentro de la
+  # zona de la cámara si hay una definida. Quien cruza el cuadro sin detenerse no suma.
   loitering_seconds: 15
+  loitering_radius_h: 0.8   # «casi en el mismo sitio» = se mueve menos de 0,8 alturas de su propio cuerpo
+  # Cercanía entre personas: la distancia entre los centros de dos personas es menor que proximity_ratio veces su
+  # altura media, durante al menos proximity_seconds seguidos.
+  proximity_ratio: 0.6
+  proximity_seconds: 1.5
+  # Seguimiento de personas (identificador que se conserva entre cuadros)
+  tracking:
+    max_lost_s: 4.0         # cuánto tiempo se recuerda a una persona que dejó de detectarse
+    min_hits: 2             # cuántas veces hay que detectarla para confirmarla (una detección de un solo cuadro no cuenta)
+    loiter_gap_s: 2.0       # si no se ve a una persona más de estos segundos, su conteo de merodeo vuelve a empezar (puede ser otra persona)
   group_size: 3
   sensitive_hours: [22, 6]
   persistence_frames: 5
