@@ -197,6 +197,8 @@ CREATE TABLE events (
     reviewed_by  uuid,                          -- quién revisó el evento (H6)
     reviewed_at  timestamptz,
     edge_event_id uuid,                         -- el id que le pone la mini PC: evita duplicados al reenviar (H2)
+    escalate_at  timestamptz,                   -- cuándo se escala una alerta que nadie revisó; no nulo = está (o estuvo) en revisión (H6)
+    escalated_at timestamptz,                   -- cuándo se escaló (una sola vez) (H6)
     CONSTRAINT ux_events_id_community UNIQUE (id, community_id),
     FOREIGN KEY (user_id, community_id)
         REFERENCES users (id, community_id) ON DELETE CASCADE,
@@ -209,6 +211,8 @@ CREATE INDEX ix_events_community_time ON events (community_id, occurred_at DESC)
 CREATE INDEX ix_events_user_time      ON events (user_id, occurred_at DESC);
 CREATE INDEX ix_events_camera_time    ON events (camera_id, occurred_at DESC);
 CREATE UNIQUE INDEX ux_events_edge_event ON events (community_id, edge_event_id) WHERE edge_event_id IS NOT NULL;
+CREATE INDEX ix_events_pending_review ON events (community_id, escalate_at)
+    WHERE escalate_at IS NOT NULL AND status = 'sin verificar';
 
 CREATE TABLE media_files (
     id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -296,8 +300,13 @@ CREATE TABLE alert_deliveries (
     attempts   smallint    NOT NULL DEFAULT 0,
     last_error text,
     sent_at    timestamptz,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    audience   text        NOT NULL DEFAULT 'normal',   -- a quién iba: normal, review (administradores, con botones), broadcast, escalated (H6)
+    telegram_message_id bigint,                         -- el mensaje enviado, para actualizarlo al revisar la alerta (H6)
+    has_photo  boolean     NOT NULL DEFAULT false,
+    CONSTRAINT ck_alert_deliveries_audience CHECK (audience IN ('normal', 'review', 'broadcast', 'escalated'))
 );
+CREATE INDEX ix_alert_deliveries_event ON alert_deliveries (event_id);
 CREATE INDEX ix_deliveries_open
     ON alert_deliveries (status, created_at) WHERE status <> 'sent';
 
