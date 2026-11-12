@@ -35,6 +35,8 @@ FACTOR_DECODIFICACION = 1.25    # se decodifican hasta 1,25 veces los cuadros pe
 RAFAGA_MAXIMA = 3.0             # cuadros seguidos que se aceptan de golpe (las cámaras RTSP los entregan en ráfagas)
 FACTOR_RITMO_ANORMAL = 3.0      # la cámara entrega más de 3 veces los cuadros pedidos...
 SEGUNDOS_RITMO_ANORMAL = 5.0    # ...durante al menos este tiempo seguido
+MAX_IDENTIFICACIONES = 2        # cámaras sin asignar que se pueden abrir a la vez para «Identificar» (H5)
+FPS_IDENTIFICAR = 5             # al identificar una cámara se lee a pocos cuadros por segundo
 
 
 def elegir_formato(pedido: str, disponibles: list[str]) -> str | None:
@@ -211,6 +213,7 @@ class GestorCaptura:
         self._formato = formato
         self._abrir = abrir
         self._capturas: dict[str, Captura] = {}
+        self._ident: dict[str, list] = {}   # clave -> [captura, hasta]: cámaras SIN asignar abiertas un momento para «Identificar»
         self._lock = threading.RLock()      # lo llaman el vigilante, la configuración remota y el bucle principal
 
     def set_asignadas(self, claves: list[str]) -> None:
@@ -222,6 +225,8 @@ class GestorCaptura:
         with self._lock:
             asignadas = list(self.asignadas)
             for clave in asignadas:
+                if clave in self._ident:         # se acaba de asignar: deja de identificarse y la lee el flujo normal
+                    self._ident.pop(clave)[0].detener()
                 info = self.inventario.fuente(clave)
                 debe = bool(info and info.state == "available" and info.uri)
                 if debe and clave not in self._capturas:
@@ -241,6 +246,46 @@ class GestorCaptura:
             c = self._capturas.get(clave)
         return c.ultimo() if c else (None, 0.0)
 
+    def identificar(self, clave: str, segundos: float, ahora: float | None = None) -> bool:
+        """
+        Abre UNA cámara sin asignar durante unos segundos, solo para que el administrador vea cuál es. Devuelve False si no se puede:
+        no existe, no está disponible, ya está asignada (esas siguen su camino normal) o ya hay el máximo abiertas.
+        """
+        ahora = time.monotonic() if ahora is None else ahora
+        with self._lock:
+            if clave in self.asignadas:
+                return False
+            existente = self._ident.get(clave)
+            if existente is not None:
+                existente[1] = max(existente[1], ahora + segundos)
+                return True
+            info = self.inventario.fuente(clave)
+            if not (info and info.state == "available" and info.uri):
+                return False
+            if len(self._ident) >= MAX_IDENTIFICACIONES:
+                return False
+            ancho, alto, fps = self._cfg
+            c = Captura(info, ancho, alto, min(fps, FPS_IDENTIFICAR), abrir=self._abrir, formato=self._formato)
+            self._ident[clave] = [c, ahora + segundos]
+            c.start()
+        return True
+
+    def ultimo_identificacion(self, clave: str):
+        """(cuadro, instante) del último cuadro de una cámara que se está identificando, o (None, 0)."""
+        with self._lock:
+            item = self._ident.get(clave)
+        return item[0].ultimo() if item else (None, 0.0)
+
+    def liberar_identificaciones(self, ahora: float | None = None, todas: bool = False) -> int:
+        """Cierra las cámaras cuyo tiempo de identificación ya se cumplió (o todas). Devuelve cuántas cerró."""
+        ahora = time.monotonic() if ahora is None else ahora
+        with self._lock:
+            vencidas = [k for k, (_, hasta) in self._ident.items() if todas or ahora >= hasta]
+            capturas = [self._ident.pop(k)[0] for k in vencidas]
+        for c in capturas:
+            c.detener()
+        return len(capturas)
+
     def estados(self) -> dict[str, dict]:
         with self._lock:
             return {clave: c.estadisticas() for clave, c in self._capturas.items()}
@@ -251,8 +296,9 @@ class GestorCaptura:
 
     def detener_todo(self) -> None:
         with self._lock:
-            capturas = list(self._capturas.values())
+            capturas = list(self._capturas.values()) + [c for c, _ in self._ident.values()]
             self._capturas.clear()
+            self._ident.clear()
         for c in capturas:
             c.detener()
         for c in capturas:

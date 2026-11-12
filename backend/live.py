@@ -39,6 +39,9 @@ MAX_VIEWERS = int(os.environ.get("LIVE_MAX_VIEWERS", "3"))          # espectador
 MAX_VISIT_S = int(os.environ.get("LIVE_MAX_VISIT_S", "300"))        # duración máxima de una visita
 MAX_STREAMS_PER_EDGE = int(os.environ.get("LIVE_MAX_STREAMS", "4"))  # flujos a la vez por mini PC (protege su CPU)
 MAX_FRAME_BYTES = 250_000
+IDENTIFY_S = int(os.environ.get("LIVE_IDENTIFY_S", "10"))             # cuánto dura la imagen de «Identificar» (H5)
+MAX_IDENTIFY_PER_EDGE = 2            # cámaras que se pueden identificar a la vez en una misma mini PC
+IDENTIFY_GRACE_S = 2.0               # margen para que llegue el último cuadro tras cumplirse el tiempo
 MIN_FRAME_GAP_S = 0.08               # como mucho ~12 cuadros por segundo por cámara: lo que sobre se descarta
 NO_SIGNAL_S = 5.0                    # sin cuadros durante este tiempo = «sin señal»
 LAST_FRAME_MAX_AGE_S = 600           # la última imagen en memoria sirve hasta 10 minutos
@@ -148,6 +151,7 @@ class Hub:
         self.camera_ok = {}                   # camera_id -> lo que dice la mini PC (False = la cámara no da cuadros)
         self.camera_edge = {}                 # camera_id -> edge_id
         self.connects = defaultdict(deque)    # user_id -> instantes de aperturas recientes
+        self.identify = {}                    # source_id -> {edge_id, hasta, last}: cámaras SIN asignar que se están identificando (H5)
         self.stats = {"cuadros": 0, "descartados": 0}
 
     def reset(self) -> None:
@@ -205,6 +209,49 @@ class Hub:
             v.offer_frame(bytes(jpeg))
         return True
 
+    def identify_active(self, source_id):
+        """El registro de una identificación en curso, o None (y se olvida) si ya se cumplió su tiempo."""
+        e = self.identify.get(source_id)
+        if e is not None and _ahora() > e["hasta"] + IDENTIFY_GRACE_S:
+            del self.identify[source_id]
+            return None
+        return e
+
+    async def start_identify(self, source_id, edge_id, device_key) -> str:
+        """
+        Le pide a la mini PC una imagen de una fuente sin asignar durante IDENTIFY_S segundos.
+        Devuelve «ok», «sin_conexion» (la mini PC no está conectada) u «ocupado» (ya identifica el máximo a la vez).
+        """
+        conn = self.edges.get(edge_id)
+        if conn is None:
+            return "sin_conexion"
+        ahora = _ahora()
+        for sid in [s for s, e in self.identify.items() if ahora > e["hasta"] + IDENTIFY_GRACE_S]:
+            del self.identify[sid]
+        actual = self.identify.get(source_id)
+        if actual is not None and actual["edge_id"] == edge_id:
+            return "ok"                                      # ya se está identificando: no se repite la orden
+        if sum(1 for e in self.identify.values() if e["edge_id"] == edge_id) >= MAX_IDENTIFY_PER_EDGE:
+            return "ocupado"
+        self.identify[source_id] = {"edge_id": edge_id, "hasta": ahora + IDENTIFY_S, "last": None}
+        try:
+            await conn.send({"cmd": "identify", "source_id": source_id, "device_key": device_key, "seconds": IDENTIFY_S, "fps": 1})
+        except Exception:       # noqa: BLE001 - la mini PC se cayó justo ahora
+            self.identify.pop(source_id, None)
+            return "sin_conexion"
+        return "ok"
+
+    def push_identify(self, source_id, jpeg) -> bool:
+        e = self.identify_active(source_id)
+        if e is None:
+            return False
+        e["last"] = (bytes(jpeg), _ahora())
+        return True
+
+    def identify_frame(self, source_id):
+        e = self.identify_active(source_id)
+        return e["last"][0] if e is not None and e["last"] is not None else None
+
     def estado_para(self, v: Viewer) -> str:
         """en_vivo, esperando o sin_senal, según lo que está pasando con la cámara de este espectador."""
         ahora = _ahora()
@@ -240,10 +287,14 @@ def _on_frame(conn: EdgeConn, datos: bytes) -> None:
     except ValueError:
         return
     jpeg = datos[16:]
-    if camera_id not in conn.cameras or not jpeg_valido(jpeg):
-        return                               # una cámara que no es de esta mini PC, o algo que no es un JPEG: se ignora
-    hub.camera_edge[camera_id] = conn.id
-    hub.push_frame(camera_id, jpeg)
+    if not jpeg_valido(jpeg):
+        return                               # algo que no es un JPEG: se ignora
+    if camera_id in conn.cameras:
+        hub.camera_edge[camera_id] = conn.id
+        hub.push_frame(camera_id, jpeg)
+    elif hub.identify.get(camera_id, {}).get("edge_id") == conn.id:
+        hub.push_identify(camera_id, jpeg)   # una fuente SIN asignar que el administrador pidió identificar (H5)
+    # cualquier otro identificador (una cámara que no es de esta mini PC) se ignora
 
 
 def _on_text(conn: EdgeConn, texto: str) -> None:
@@ -304,6 +355,8 @@ async def handle_edge(ws: WebSocket) -> None:
         if hub.edges.get(conn.id) is conn:
             del hub.edges[conn.id]
         conn.streams.clear()
+        for sid in [s for s, e in hub.identify.items() if e["edge_id"] == conn.id]:
+            hub.identify.pop(sid, None)
         log.info("Mini PC desconectada del relevo.")
 
 

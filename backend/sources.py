@@ -385,3 +385,29 @@ def unassign_source(admin, source_id, ip=None):
                        VALUES ('user', %s, %s, %s, 'unassign_source', 'camera_source', %s, %s, %s::jsonb)""",
                     (admin["id"], admin["community_id"], actual["user_id"], source_id, ip, json.dumps(meta)))
     return {"archived_camera_id": actual["id"]}
+
+
+def identify_info(admin, source_id):
+    """
+    Lo que hace falta para identificar una fuente: a qué mini PC pertenece, su identificador, su estado y si ya está asignada.
+    Una fuente de otra comunidad responde igual que una que no existe.
+    """
+    if not cameras.is_uuid(source_id):
+        raise AssignError(404, "Esa fuente no existe.", "no_existe")
+    with db.cursor() as cur:
+        cur.execute("""SELECT s.id::text AS id, s.edge_device_id::text AS edge_id, s.device_key, s.state,
+                              EXISTS (SELECT 1 FROM cameras c WHERE c.source_id = s.id AND c.is_active) AS asignada
+                       FROM camera_sources s WHERE s.id = %s AND s.community_id = %s""", (source_id, admin["community_id"]))
+        fila = cur.fetchone()
+    if fila is None:
+        raise AssignError(404, "Esa fuente no existe.", "no_existe")
+    return dict(fila)
+
+
+def audit_identify(admin, info, ip=None):
+    """Queda anotado que un administrador pidió ver la imagen de una cámara que todavía no tiene dueño."""
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id, ip, meta)
+                       VALUES ('user', %s, %s, 'identify_source', 'camera_source', %s, %s, %s::jsonb)""",
+                    (admin["id"], admin["community_id"], info["id"], ip,
+                     json.dumps({"device_key": info["device_key"], "edge_device_id": info["edge_id"]})))

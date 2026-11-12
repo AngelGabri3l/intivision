@@ -981,6 +981,46 @@ async def admin_unassign_source(source_id: str, request: Request, user: dict = D
     return JSONResponse(content=resultado)
 
 
+@app.post("/admin/sources/{source_id}/identify")
+async def admin_identify_source(source_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """
+    «Identificar» (H5): le pide a la mini PC una imagen de una cámara SIN asignar durante unos segundos, para saber cuál es.
+    Solo se puede con una fuente sin asignar, disponible y de una mini PC conectada. Queda en audit_log.
+    """
+    try:
+        info = await asyncio.to_thread(sources.identify_info, user, source_id)
+    except sources.AssignError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    if info["asignada"]:
+        return JSONResponse(status_code=409, content={"error": "Esa cámara ya está asignada: solo se puede identificar una sin asignar.", "code": "ya_asignada"})
+    if info["state"] != "available":
+        return JSONResponse(status_code=409, content={"error": "La cámara está desconectada: no se puede identificar.", "code": "desconectada"})
+    if not live.hub.rate_ok("identify:" + str(user["id"])):
+        return JSONResponse(status_code=429, content={"error": "Pediste demasiadas imágenes seguidas. Espera un momento.", "code": "limite"})
+    estado = await live.hub.start_identify(info["id"], info["edge_id"], info["device_key"])
+    if estado == "sin_conexion":
+        return JSONResponse(status_code=409, content={"error": "La mini PC no está conectada en este momento.", "code": "equipo_sin_conexion"})
+    if estado == "ocupado":
+        return JSONResponse(status_code=429, content={"error": "Esa mini PC ya está identificando otras cámaras. Espera unos segundos.", "code": "ocupado"})
+    await asyncio.to_thread(sources.audit_identify, user, info, auth._clean_ip(auth.client_ip(request)))
+    return JSONResponse(status_code=202, content={"seconds": live.IDENTIFY_S})
+
+
+@app.get("/admin/sources/{source_id}/identificar.jpg")
+async def admin_identify_image(source_id: str, user: dict = Depends(auth.require_admin)):
+    """La última imagen de la cámara que se está identificando. 404 mientras todavía no llega la primera."""
+    try:
+        info = await asyncio.to_thread(sources.identify_info, user, source_id)
+    except sources.AssignError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    if info["asignada"]:
+        return JSONResponse(status_code=409, content={"error": "Esa cámara ya está asignada.", "code": "ya_asignada"})
+    jpeg = live.hub.identify_frame(info["id"])
+    if jpeg is None:
+        return JSONResponse(status_code=404, content={"error": "Todavía no hay imagen.", "code": "sin_imagen"})
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/admin/equipos/datos")
 async def admin_equipos_datos(user: dict = Depends(auth.require_admin)):
     """Los equipos con sus cámaras y las personas a quienes se pueden asignar (lo usa la pantalla «Equipos y cámaras»)."""

@@ -34,6 +34,7 @@ from . import __version__
 log = logging.getLogger("agent.relevo")
 
 FPS_MIN, FPS_MAX, FPS_DEFECTO = 1, 8, 5
+IDENT_MAX_S, IDENT_DEFECTO_S, IDENT_FPS_MAX, MAX_IDENTIFICACIONES = 15, 10, 2, 2     # «Identificar» (H5)
 MAX_BYTES = 200_000
 EDAD_MAX_CUADRO_S = 2.0              # una cámara sin cuadros nuevos hace más que esto se declara sin señal
 PING_CADA_S = 20.0                   # mantiene viva la conexión a través del router
@@ -118,6 +119,7 @@ class Relevo(threading.Thread):
         self._parar = threading.Event()
         self._ws = None
         self.streams: dict[str, dict] = {}       # camera_id -> estado de ese flujo
+        self.identificaciones: dict[str, dict] = {}   # source_id -> estado de esa identificación (cámaras sin asignar)
         self.conectado = False
         self.sesiones = 0
         self.ultimo_error: str | None = None
@@ -153,6 +155,7 @@ class Relevo(threading.Thread):
                 self.conectado = False           # se dice YA, no después de la espera de reintento
                 self._ws = None
                 self.streams.clear()
+                self._soltar_identificaciones()
                 try:
                     ws.close()
                 except Exception:       # noqa: BLE001
@@ -191,6 +194,7 @@ class Relevo(threading.Thread):
             ws.settimeout(self._espera())        # no más de lo que falta para el siguiente cuadro: así se respeta el ritmo pedido
             self._recibir(ws)
             self._enviar_pendientes(ws)
+            self._enviar_identificaciones(ws)
             ahora = self._reloj()
             if ahora - ultimo_ping >= PING_CADA_S:
                 ws.ping()
@@ -201,9 +205,10 @@ class Relevo(threading.Thread):
 
     def _espera(self) -> float:
         """Cuánto esperar un mensaje del servidor: hasta el siguiente cuadro que toca enviar, y nunca más de 0,25 s."""
-        if not self.streams:
+        proximos = [s["proximo"] for s in self.streams.values()] + [s["proximo"] for s in self.identificaciones.values()]
+        if not proximos:
             return 0.25
-        return max(0.005, min(0.25, min(s["proximo"] for s in self.streams.values()) - self._reloj()))
+        return max(0.005, min(0.25, min(proximos) - self._reloj()))
 
     def _recibir(self, ws) -> None:
         try:
@@ -227,7 +232,12 @@ class Relevo(threading.Thread):
             m = json.loads(texto)
         except ValueError:
             return
-        if not isinstance(m, dict) or not isinstance(m.get("camera_id"), str):
+        if not isinstance(m, dict):
+            return
+        if m.get("cmd") == "identify":
+            self._identificar(m)
+            return
+        if not isinstance(m.get("camera_id"), str):
             return
         try:
             cid = str(uuid.UUID(m["camera_id"]))
@@ -237,6 +247,32 @@ class Relevo(threading.Thread):
             self._iniciar(cid, m.get("fps"))
         elif m.get("cmd") == "stop":
             self._detener(cid)
+
+    def _identificar(self, m: dict) -> None:
+        """
+        «Identificar» (H5): el administrador pide ver qué cámara es una SIN asignar. Se abre un momento y se manda una imagen por
+        segundo. Solo se abre algo que esta mini PC ya tiene en su propio inventario, nunca una dirección que mande el servidor.
+        """
+        try:
+            sid = str(uuid.UUID(m["source_id"]))
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return
+        clave = m.get("device_key")
+        if not isinstance(clave, str) or not 0 < len(clave) <= 300:
+            return
+        seg = m.get("seconds")
+        seg = max(1, min(IDENT_MAX_S, seg if isinstance(seg, int) and not isinstance(seg, bool) else IDENT_DEFECTO_S))
+        fps = m.get("fps")
+        fps = max(1, min(IDENT_FPS_MAX, fps if isinstance(fps, int) and not isinstance(fps, bool) else 1))
+        if sid not in self.identificaciones and len(self.identificaciones) >= MAX_IDENTIFICACIONES:
+            self._responder({"type": "error", "source_id": sid, "motivo": "maximo_de_identificaciones"})
+            return
+        if not self.gestor.identificar(clave, seg):
+            self._responder({"type": "error", "source_id": sid, "motivo": "no_disponible"})
+            return
+        ahora = self._reloj()
+        self.identificaciones[sid] = {"device_key": clave, "fps": fps, "hasta": ahora + seg, "proximo": ahora, "instante": None, "enviados": 0}
+        log.info("identificación pedida: fuente %s durante %d s", sid[:8], seg)
 
     def _iniciar(self, cid: str, fps) -> None:
         device_key = self._device_key(cid)
@@ -276,6 +312,35 @@ class Relevo(threading.Thread):
             ws.send_binary(uuid.UUID(cid).bytes + datos)
             s["enviados"] += 1
             s["bytes"] += len(datos)
+
+    def _enviar_identificaciones(self, ws) -> None:
+        for sid, s in list(self.identificaciones.items()):
+            ahora = self._reloj()
+            if ahora >= s["hasta"]:
+                self.identificaciones.pop(sid, None)
+                self.gestor.liberar_identificaciones()
+                log.info("identificación terminada: fuente %s (%d cuadros)", sid[:8], s["enviados"])
+                continue
+            if ahora < s["proximo"]:
+                continue
+            s["proximo"] = max(s["proximo"] + 1.0 / s["fps"], ahora - 1.0 / s["fps"])
+            cuadro, instante = self.gestor.ultimo_identificacion(s["device_key"])
+            if cuadro is None or ahora - instante > EDAD_MAX_CUADRO_S or instante == s["instante"]:
+                continue                         # todavía no hay cuadro, es viejo, o es el mismo que ya se mandó
+            datos = codificar_vivo(cuadro, self.ancho, self.calidad)
+            if datos is None:
+                continue
+            s["instante"] = instante
+            ws.send_binary(uuid.UUID(sid).bytes + datos)
+            s["enviados"] += 1
+
+    def _soltar_identificaciones(self) -> None:
+        """Al cortarse la conexión no queda ninguna cámara abierta de más."""
+        self.identificaciones.clear()
+        try:
+            self.gestor.liberar_identificaciones(todas=True)
+        except Exception:       # noqa: BLE001
+            pass
 
     def _estadisticas(self, ventana: float) -> None:
         for cid, s in self.streams.items():

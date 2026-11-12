@@ -92,7 +92,15 @@
   }
 
   // ------------------------------------------------------------------ paneles de una cámara
+  function detenerIdentificacion(fila) {
+    if (fila.ident) {
+      clearInterval(fila.ident.intervalo);
+      clearTimeout(fila.ident.espera);
+      fila.ident = null;
+    }
+  }
   function cerrarPanel(fila) {
+    detenerIdentificacion(fila);
     while (fila.panel.firstChild) { fila.panel.removeChild(fila.panel.firstChild); }
     fila.panel.hidden = true;
     fila.modo = null;
@@ -269,6 +277,79 @@
     bSi.focus();
   }
 
+  // ------------------------------------------------------------------ identificar una cámara sin asignar
+  function motivoNoIdentificar(fila) {
+    if (fila.datos.camera) { return "Esa cámara ya está asignada: solo se puede identificar una sin asignar."; }
+    if (fila.datos.state !== "available") { return "La cámara está desconectada: no se puede identificar."; }
+    if (fila.estadoEquipo !== "online") { return "La mini PC no tiene señal: no se puede identificar."; }
+    return "";
+  }
+
+  function abrirIdentificacion(fila) {
+    var motivo = motivoNoIdentificar(fila);
+    if (motivo) { fila.msg.textContent = motivo; return; }
+    cerrarPanel(fila);
+    var f = fila.datos, ruta = "/admin/sources/" + encodeURIComponent(f.id);
+    fila.panel.hidden = false;
+    fila.modo = "identificar";
+    fila.msg.textContent = "";
+    var caja = el("div", "eq-ident");
+    var titulo = el("p", "eq-pregunta", "Abriendo la cámara…");
+    titulo.setAttribute("role", "status");
+    var img = document.createElement("img");
+    img.className = "eq-ident__img";
+    img.alt = "Imagen de la cámara " + f.label;
+    img.hidden = true;
+    var restante = el("p", "eq-msg", "");
+    var bCerrar = boton("Cerrar", "btn btn--texto");
+    caja.appendChild(titulo); caja.appendChild(img); caja.appendChild(restante); caja.appendChild(bCerrar);
+    fila.panel.appendChild(caja);
+    var ident = { intervalo: null, espera: null, recibida: false };
+    fila.ident = ident;
+    bCerrar.addEventListener("click", function () { cerrarPanel(fila); fila.bIdentificar.focus(); });
+    img.addEventListener("load", function () {
+      ident.recibida = true;
+      img.hidden = false;
+      titulo.textContent = "Así se ve «" + f.label + "»";
+    });
+    pedir(ruta + "/identify").then(function (x) {
+      if (fila.ident !== ident) { return; }                 // se cerró mientras tanto
+      if (x.status === 202) {
+        var seg = Number(x.d.seconds) > 0 ? Math.min(30, Math.floor(Number(x.d.seconds))) : 10;
+        var fin = Date.now() + seg * 1000;
+        var tic = function () {
+          var falta = Math.ceil((fin - Date.now()) / 1000);
+          if (falta <= 0) { cerrarPanel(fila); decir("Se cerró la imagen de «" + f.label + "»."); return; }
+          restante.textContent = "Se cierra en " + falta + " s.";
+          img.src = ruta + "/identificar.jpg?n=" + Date.now();
+        };
+        ident.intervalo = setInterval(tic, 1000);
+        ident.espera = setTimeout(function () {
+          if (!ident.recibida) { titulo.textContent = "No llegó imagen. Revisa que la cámara esté conectada y que no la esté usando otra aplicación."; }
+        }, 8000);
+        tic();
+      } else if (x.status === 409 && x.d.code === "ya_asignada") {
+        cerrarPanel(fila);
+        decir("Esa cámara ya está asignada: solo se puede identificar una sin asignar.");
+        cargar(false);
+      } else if (x.status === 404) {
+        cerrarPanel(fila);
+        decir("Esa cámara ya no existe.");
+        cargar(false);
+      } else if (x.status === 401) {
+        irAlInicio();
+      } else if (x.status === 409 || x.status === 429) {
+        titulo.textContent = x.d.error || "No se pudo identificar la cámara.";
+      } else if (x.status === 403) {
+        titulo.textContent = "Ya no tienes permiso para hacer esto.";
+      } else {
+        titulo.textContent = "No se pudo identificar la cámara. Inténtalo de nuevo.";
+      }
+    }, function () {
+      if (fila.ident === ident) { titulo.textContent = "Sin conexión. Inténtalo de nuevo."; }
+    });
+  }
+
   // ------------------------------------------------------------------ filas y tarjetas
   function crearFila(equipo, f) {
     var fila = { id: f.id, datos: f, enviando: false, modo: null };
@@ -284,16 +365,18 @@
     fila.conexion = el("span");
     est.appendChild(fila.asignacion); est.appendChild(fila.detalle); est.appendChild(fila.conexion);
     var acciones = el("div", "eq-fila__acciones");
+    fila.bIdentificar = boton("Identificar", "btn");
     fila.bAsignar = boton("Asignar", "btn");
     fila.bReasignar = boton("Reasignar", "btn");
     fila.bQuitar = boton("Quitar asignación", "btn btn--texto");
-    acciones.appendChild(fila.bAsignar); acciones.appendChild(fila.bReasignar); acciones.appendChild(fila.bQuitar);
+    acciones.appendChild(fila.bIdentificar); acciones.appendChild(fila.bAsignar); acciones.appendChild(fila.bReasignar); acciones.appendChild(fila.bQuitar);
     fila.panel = el("div", "eq-fila__panel");
     fila.panel.hidden = true;
     fila.msg = el("p", "eq-msg");
     fila.el.appendChild(info); fila.el.appendChild(est); fila.el.appendChild(acciones);
     fila.el.appendChild(fila.panel); fila.el.appendChild(fila.msg);
     fila.bAsignar.addEventListener("click", function () { if (!fila.enviando) { abrirFormulario(fila, "asignar"); } });
+    fila.bIdentificar.addEventListener("click", function () { if (!fila.enviando && fila.modo !== "identificar") { abrirIdentificacion(fila); } });
     fila.bReasignar.addEventListener("click", function () { if (!fila.enviando) { abrirFormulario(fila, "reasignar"); } });
     fila.bQuitar.addEventListener("click", function () { if (!fila.enviando) { abrirConfirmacion(fila); } });
     actualizarFila(fila, equipo, f);
@@ -311,6 +394,13 @@
     fila.bAsignar.hidden = asignada;
     fila.bReasignar.hidden = !asignada;
     fila.bQuitar.hidden = !asignada;
+    fila.estadoEquipo = equipo.state;
+    fila.bIdentificar.hidden = asignada;
+    var inactivo = !!motivoNoIdentificar(fila);
+    fila.bIdentificar.setAttribute("aria-disabled", inactivo ? "true" : "false");
+    fila.bIdentificar.className = inactivo ? "btn eq-btn--inactivo" : "btn";
+    fila.bIdentificar.title = motivoNoIdentificar(fila);
+    if (asignada && fila.modo === "identificar") { cerrarPanel(fila); }      // alguien la asignó mientras se identificaba
   }
 
   function crearEquipo(e) {

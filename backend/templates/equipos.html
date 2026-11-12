@@ -329,6 +329,9 @@ a.btn { text-decoration: none; }
 .eq-error { min-height: 1.2em; margin: 0; font-size: 13px; font-weight: 700; color: hsl(var(--foreground)); }
 .eq-msg { flex: 1 1 100%; margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
 .eq-msg:empty { display: none; }
+.eq-ident { display: grid; gap: 10px; max-width: 520px; }
+.eq-ident__img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: hsl(var(--foreground)); border: 1px solid hsl(var(--borde-fuerte)); }
+.btn.eq-btn--inactivo, .btn.eq-btn--inactivo:hover { border-color: hsl(var(--border)); background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); cursor: not-allowed; }
 @media (max-width: 520px) {
   .eq-fila__acciones { width: 100%; flex-direction: column; }
   .eq-fila__acciones .btn { width: 100%; }
