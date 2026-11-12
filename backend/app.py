@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 import tempfile
+import unicodedata
 import logging
 import datetime
 import html
@@ -244,11 +245,19 @@ REASON_CODES = [
     ("horario sensible", "sensitive_hour"),
     ("merodeo", "loitering"),
     ("grupo de", "group"),
+    ("cercanía entre personas", "proximity"),
     ("trepando", "climbing"),
     ("persona en el suelo", "fallen"),
     ("posible asalto", "hands_up"),
 ]
 DETAIL_CODES = {"loitering", "group"}          # estos llevan detalle ("merodeo 18s", "grupo de 3")
+
+
+def _sin_tildes(texto):
+    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+
+
+_PREFIJOS = [(_sin_tildes(prefijo), codigo) for prefijo, codigo in REASON_CODES]      # se compara sin tildes: «cercanía» o «cercania» dan lo mismo
 
 
 def parse_reasons(reasons):
@@ -259,8 +268,8 @@ def parse_reasons(reasons):
         items = [str(r).strip() for r in (reasons or [])]
     out = []
     for item in items:
-        low = item.lower()
-        for prefix, code in REASON_CODES:
+        low = _sin_tildes(item).lower()
+        for prefix, code in _PREFIJOS:
             if low.startswith(prefix):
                 out.append((code, item if code in DETAIL_CODES else None))
                 break
@@ -300,8 +309,11 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
             return None
         event_id = fila["id"]
         for code, detail in parse_reasons(e.get("reasons")):
+            # Un motivo que todavía no esté en el catálogo `signals` (por ejemplo, la migración 004 aún no se aplicó) NO debe tirar el evento
+            # entero: simplemente no queda registrado como señal.
             cur.execute("""INSERT INTO event_signals (event_id, signal_code, detail)
-                           VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""", (event_id, code, detail))
+                           SELECT %s, %s, %s WHERE EXISTS (SELECT 1 FROM signals WHERE code = %s)
+                           ON CONFLICT DO NOTHING""", (event_id, code, detail, code))
         if image:
             try:
                 size = os.path.getsize(os.path.join(EVIDENCE_DIR, image))

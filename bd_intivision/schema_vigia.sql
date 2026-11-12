@@ -250,6 +250,7 @@ INSERT INTO signals (code, description) VALUES
     ('sensitive_hour',     'Horario sensible'),
     ('loitering',          'Merodeo'),
     ('group',              'Grupo de personas'),
+    ('proximity',          'Cercanía entre personas'),
     ('climbing',           'Trepando'),
     ('fallen',             'Persona en el suelo'),
     ('hands_up',           'Posible asalto (manos arriba)');
