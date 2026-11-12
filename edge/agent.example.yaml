@@ -15,6 +15,12 @@ analysis:                  # la detección con el motor (necesita la imagen cons
   event_cooldown_s: 10     # tiempo mínimo entre dos eventos de una misma cámara (el servidor, además, limita los avisos por Telegram)
   max_gap_s: 10            # si una cámara estuvo sin cuadros más de esto, se reinicia su análisis (no se arrastra el merodeo)
 
+live:                      # la imagen en vivo que ven los vecinos desde el celular (la pide el servidor; sin pedido no se envía nada)
+  enabled: true
+  max_streams: 4           # cámaras en vivo a la vez
+  width: 640               # ancho de la imagen
+  jpeg_quality: 70         # calidad JPEG (más baja = menos datos)
+
 queue:                     # eventos que no se pudieron enviar (sin internet): se guardan en disco y se envían en orden al volver
   max_mb: 200              # tope de tamaño; si se pasa, se descarta lo más viejo
   max_age_h: 24            # tope de antigüedad

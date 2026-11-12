@@ -3,6 +3,7 @@
 **
 !edge/requirements.txt
 !edge/requirements-motor.txt
+!edge/requirements-live.txt
 !edge/agent
 !engine.py
 !detector.py

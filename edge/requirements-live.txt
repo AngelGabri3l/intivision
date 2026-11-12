@@ -1,0 +1,2 @@
+# La imagen en vivo (H7): cliente WebSocket del agente. Va en una capa aparte del Dockerfile.
+websocket-client>=1.6,<2

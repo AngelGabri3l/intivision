@@ -34,6 +34,7 @@ from .enviador import Enviador
 from .evidencia import imagen_de_prueba
 from .inventory import Inventario, Vigilante, sondear_una_vez
 from .latido import Latido
+from .relevo import Relevo, probar_relevo
 from .simulador import SimuladorEventos, evento_de_prueba
 from .sources import construir_descubridores
 
@@ -340,6 +341,11 @@ def cmd_probar(args, cfg) -> int:
             print(f"no se pudo enviar el inventario: {e}", file=sys.stderr)
             return 4
         print(f"inventario enviado: {r.get('sources')} cámara(s), {r.get('new')} nueva(s) para el servidor")
+    if args.relevo:
+        ok, mensaje = probar_relevo(cliente.base_url, cfg.edge_token)
+        print(f"relevo de imagen en vivo: {mensaje}", file=sys.stdout if ok else sys.stderr)
+        if not ok:
+            return 4
     return 0
 
 
@@ -439,7 +445,7 @@ def cmd_vigilar(args, cfg) -> int:
     # Con servidor, el administrador decide qué cámaras se leen; sin servidor, las de agent.yaml (como en H1).
     gestor = GestorCaptura(inv, [] if cliente else cfg.assigned, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
     simbolo = {"aparecio": "+ apareció", "desaparecio": "- desapareció", "reaparecio": "+ volvió", "cambio": "~ cambió"}
-    cola = remota = latido = enviador = simulador = analizador = None
+    cola = remota = latido = enviador = simulador = analizador = relevo = None
     if cliente:
         cola = ColaLocal(cfg.data_dir, int(cfg.queue_max_mb * 1e6), cfg.queue_max_age_h * 3600)
 
@@ -452,6 +458,8 @@ def cmd_vigilar(args, cfg) -> int:
         enviador = Enviador(cola, cliente, al_perder_camara=latido.despertar)
         if args.simular_eventos:
             simulador = SimuladorEventos(cola, remota, gestor, enviador, args.simular_eventos, args.nivel_simulado)
+        if cfg.live_enabled:
+            relevo = Relevo(cliente.base_url, cfg.edge_token, gestor, remota, cfg.live_width, cfg.live_jpeg_quality, cfg.live_max_streams)
         if cfg.analysis_enabled and not args.sin_deteccion:
             analizador = Analizador(lambda: cargar_motor(cfg.engine_config), gestor, remota, cola, enviador, os.path.join(cfg.data_dir, "tmp_evidencia"),
                                     cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s)
@@ -479,7 +487,7 @@ def cmd_vigilar(args, cfg) -> int:
     else:
         print(f"agente {__version__} vigilando SIN servidor (modo local); asignadas: {cfg.assigned or 'ninguna'}", flush=True)
     vigilante.start()
-    for hilo in (enviador, latido, simulador, analizador):
+    for hilo in (enviador, latido, simulador, analizador, relevo):
         if hilo:
             hilo.start()
     inicio = time.monotonic()
@@ -490,6 +498,9 @@ def cmd_vigilar(args, cfg) -> int:
                 print(f"[{_hora()}] leyendo {clave}: {e['fps']} fps, {e['ancho']}x{e['alto']}, edad {e['edad_s']} s"
                       + (f", error: {e['error']}" if e["error"] else "")
                       + (f" | AVISO: {e['aviso']}" if e["aviso"] else ""), flush=True)
+            if relevo:
+                r = relevo.estado()
+                print(f"[{_hora()}] relevo: {'conectado' if r['conectado'] else 'sin conexión'}, {r['flujos']} cámara(s) en vivo, {r['enviados']} cuadros enviados", flush=True)
             if analizador:
                 a = analizador.estado()
                 if a["motor"] == "listo":
@@ -506,10 +517,10 @@ def cmd_vigilar(args, cfg) -> int:
                 break
     finally:
         vigilante.detener()
-        for hilo in (analizador, simulador, latido, enviador):
+        for hilo in (relevo, analizador, simulador, latido, enviador):
             if hilo:
                 hilo.detener()
-        for hilo in (analizador, simulador, latido, enviador):
+        for hilo in (relevo, analizador, simulador, latido, enviador):
             if hilo and hilo.is_alive():
                 hilo.join(timeout=5)
         gestor.detener_todo()
@@ -567,6 +578,7 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("probar", help="comprueba la conexión con el servidor y el token (no crea nada)")
     s.add_argument("--inventario", action="store_true", help="además manda el inventario de cámaras de este equipo")
+    s.add_argument("--relevo", action="store_true", help="además comprueba la conexión del relevo de imagen en vivo (WebSocket)")
     s.set_defaults(func=cmd_probar)
 
     s = sub.add_parser("enviar-prueba", help="manda un evento de prueba con foto al servidor")

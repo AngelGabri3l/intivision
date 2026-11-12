@@ -54,6 +54,10 @@ class Config:
     analysis_event_cooldown_s: float = 10.0   # tiempo mínimo entre eventos de una misma cámara
     analysis_max_gap_s: float = 10.0    # sin cuadros más de este tiempo: se reinicia el análisis de esa cámara
     engine_config: str | None = None    # variable ENGINE_CONFIG: otro config.yaml para el motor
+    live_enabled: bool = True           # enviar imagen en vivo cuando el servidor la pida (H7)
+    live_max_streams: int = 4           # cámaras en vivo a la vez
+    live_width: int = 640               # ancho de la imagen en vivo
+    live_jpeg_quality: int = 70
     server_url: str | None = None       # variable SERVER_URL
     edge_token: str | None = field(default=None, repr=False)    # variable EDGE_TOKEN: nunca se imprime
 
@@ -183,6 +187,17 @@ def cargar(ruta: str | None = None) -> Config:
     cfg.analysis_fps = _numero(an, "fps", cfg.analysis_fps, 0.2, 15)
     cfg.analysis_event_cooldown_s = _numero(an, "event_cooldown_s", cfg.analysis_event_cooldown_s, 1, 3600)
     cfg.analysis_max_gap_s = _numero(an, "max_gap_s", cfg.analysis_max_gap_s, 2, 300)
+
+    vivo = datos.get("live") or {}
+    if not isinstance(vivo, dict):
+        raise ConfigError("'live' debe ser un diccionario (enabled, max_streams, width, jpeg_quality)")
+    activo = vivo.get("enabled", True)
+    if not isinstance(activo, bool):
+        raise ConfigError("'live.enabled' debe ser true o false")
+    cfg.live_enabled = activo
+    cfg.live_max_streams = int(_numero(vivo, "max_streams", cfg.live_max_streams, 1, 8))
+    cfg.live_width = int(_numero(vivo, "width", cfg.live_width, 160, 1280))
+    cfg.live_jpeg_quality = int(_numero(vivo, "jpeg_quality", cfg.live_jpeg_quality, 20, 95))
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):
