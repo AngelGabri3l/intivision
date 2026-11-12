@@ -73,7 +73,7 @@ class Telegram:
         return self._call("deleteWebhook", timeout=10)
 
     def get_updates(self, offset=None, timeout=25):
-        data = {"timeout": timeout, "allowed_updates": json.dumps(["message"])}
+        data = {"timeout": timeout, "allowed_updates": json.dumps(["message", "callback_query"])}
         if offset is not None:
             data["offset"] = offset
         return self._call("getUpdates", data=data, timeout=timeout + 10) or []
@@ -83,6 +83,25 @@ class Telegram:
         if reply_markup:
             data["reply_markup"] = json.dumps(reply_markup)
         return self._call("sendMessage", data=data, timeout=15)
+
+    def answer_callback_query(self, callback_id, text=None, alert=False):
+        """Responde al clic en un botón (quita el relojito del botón y, si se pide, muestra un aviso)."""
+        data = {"callback_query_id": callback_id, "show_alert": "true" if alert else "false"}
+        if text:
+            data["text"] = text[:190]
+        return self._call("answerCallbackQuery", data=data, timeout=10)
+
+    def edit_message_caption(self, chat_id, message_id, caption, reply_markup=None):
+        """Cambia el texto de un mensaje con foto. Sin reply_markup, se quitan los botones."""
+        data = {"chat_id": chat_id, "message_id": message_id, "caption": caption,
+                "reply_markup": json.dumps(reply_markup if reply_markup is not None else {"inline_keyboard": []})}
+        return self._call("editMessageCaption", data=data, timeout=15)
+
+    def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+        """Cambia el texto de un mensaje sin foto. Sin reply_markup, se quitan los botones."""
+        data = {"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": "true",
+                "reply_markup": json.dumps(reply_markup if reply_markup is not None else {"inline_keyboard": []})}
+        return self._call("editMessageText", data=data, timeout=15)
 
     def send_photo(self, chat_id, path, caption, reply_markup=None):
         data = {"chat_id": chat_id, "caption": caption}

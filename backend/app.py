@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import asyncio
+import threading
 import time
 import tempfile
 import logging
@@ -23,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
+from backend import hitl  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -433,6 +435,15 @@ def dispatch_live_alert(event, camera_id=None):
         d["actuator"].warn()
 
 
+def trigger_siren():
+    """La sirena que suena cuando un administrador confirma una alerta (H6). Usa el mismo actuador que las demás alertas."""
+    d = get_dispatcher()
+    if not d["enabled"]:
+        return
+    log.warning("SIRENA | activada porque un administrador confirmó una alerta")
+    d["actuator"].trigger(d["siren_s"])
+
+
 # ---------------------- errores ----------------------
 
 @app.exception_handler(psycopg2.OperationalError)
@@ -565,6 +576,7 @@ def startup():
     get_dispatcher()
     cfg = load_cfg()
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
+    alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
 
 
@@ -580,6 +592,37 @@ def health():
         return {"status": "ok", "db": "ok"}
     except Exception:
         return JSONResponse(status_code=503, content={"status": "degradado", "db": "error"})
+
+
+# ---------------------- revisión del administrador (H6) ----------------------
+
+@app.get("/admin/review/pending")
+async def admin_review_pending(user: dict = Depends(auth.require_admin)):
+    """Las alertas de la comunidad que esperan que un administrador las confirme o las descarte (la usa la pantalla de H9)."""
+    return JSONResponse(content=await asyncio.to_thread(hitl.pending, user))
+
+
+@app.post("/admin/review/{event_id}")
+async def admin_review(event_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """Confirma o descarta una alerta: {"decision": "confirmar" | "descartar"}. Tiene el mismo efecto que los botones de Telegram."""
+    cuerpo = await _read_limited(request, 2_000)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "La solicitud es demasiado grande."})
+    try:
+        datos = json.loads(cuerpo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
+    decision = datos.get("decision") if isinstance(datos, dict) else None
+    try:
+        res = await asyncio.to_thread(hitl.review_event, user, event_id, decision, "web",
+                                      auth._clean_ip(auth.client_ip(request)), alerts.on_review_applied)
+    except hitl.ReviewError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    if not res["applied"]:
+        return JSONResponse(status_code=409, content={"ok": False, "estado": res["estado"], "code": "ya_revisada",
+                                                      "error": "Esta alerta ya fue revisada."})
+    threading.Thread(target=alerts.after_review, args=(res, user), name="revision-envio", daemon=True).start()
+    return JSONResponse(content={"ok": True, "estado": res["estado"]})
 
 
 # ---------------------- imagen en vivo de la mini PC (H7) y PWA ----------------------

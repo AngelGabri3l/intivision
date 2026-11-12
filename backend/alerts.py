@@ -18,7 +18,7 @@ import time
 
 import psycopg2.errors
 
-from backend import camera_watch, db, telegram_api
+from backend import camera_watch, db, hitl, telegram_api
 
 log = logging.getLogger("alerts")
 
@@ -40,6 +40,7 @@ _recent = {"test": {}, "link": {}}
 _recent_lock = threading.Lock()
 _threads = []
 _stop = threading.Event()
+_siren = None                                        # función que hace sonar la sirena (la pone app.py)
 
 
 # ------------------------------------------------------------------ configuración
@@ -198,6 +199,9 @@ _HELP = "Este bot solo envía alertas de VIGÍA. Para vincularlo, abre VIGÍA, e
 
 
 def handle_update(update):
+    if update.get("callback_query"):
+        handle_callback(update["callback_query"])                # un clic en Confirmar o Descartar (H6)
+        return
     msg = update.get("message") or {}
     chat = msg.get("chat") or {}
     if chat.get("id") is None:
@@ -256,8 +260,8 @@ def poll_forever(stop):
 # ------------------------------------------------------------------ a quién se avisa
 
 _ENQUEUE_HEAD = """
-    INSERT INTO alert_deliveries (event_id, channel_id)
-    SELECT %(event)s, ch.id
+    INSERT INTO alert_deliveries (event_id, channel_id, audience)
+    SELECT %(event)s, ch.id, %(audience)s
     FROM notification_channels ch
     JOIN users u ON u.id = ch.user_id AND u.status = 'active'
     WHERE ch.kind = 'telegram' AND ch.is_active AND ch.verified_at IS NOT NULL AND ch.chat_id IS NOT NULL
@@ -277,10 +281,12 @@ def enqueue(cur, event_id, community_id, camera_id, user_id, level):
     """
     Crea los avisos de un evento, dentro de la misma operación que lo guardó (así no se pierde ninguno).
     Solo avisan los MEDIO y ALTO. Devuelve cuántos avisos se crearon.
+    Si la comunidad activó la revisión (H6) y el evento es de una zona común, el aviso va SOLO a los administradores, con botones,
+    y el evento queda esperando su respuesta.
     """
     if level not in LEVELS:
         return 0
-    owner, a_admins = None, False
+    owner, a_admins, comun = None, False, False
     if camera_id:
         cur.execute("SELECT kind, user_id::text AS user_id FROM cameras WHERE id = %s", (str(camera_id),))
         cam = cur.fetchone()
@@ -288,12 +294,21 @@ def enqueue(cur, event_id, community_id, camera_id, user_id, level):
             owner = cam["user_id"]
         else:
             a_admins = True                                      # zona común: la ven los administradores
+            comun = bool(cam and cam["kind"] == "common")
     elif user_id:
         owner = str(user_id)
     else:
         a_admins = True
+    audience = "normal"
+    if comun:
+        decision = hitl.review_decision(cur, event_id, community_id, camera_id, level)   # H6: ¿lo revisa un administrador primero?
+        if decision == "cubierto":
+            return 0                                             # ya hay una revisión abierta de esta cámara: no se avisa otra vez
+        if decision is not None:
+            audience = "review"
+            hitl.start_review(cur, event_id, decision)
     params = {"event": event_id, "level": level, "camera": str(camera_id) if camera_id else None,
-              "cooldown": COOLDOWN[level], "owner": owner, "community": str(community_id)}
+              "cooldown": COOLDOWN[level], "owner": owner, "community": str(community_id), "audience": audience}
     sql = _ENQUEUE_HEAD + (_TO_ADMINS if a_admins else _TO_OWNER) + _ENQUEUE_TAIL
     cur.execute(sql, params)
     return cur.rowcount
@@ -304,6 +319,8 @@ def enqueue(cur, event_id, community_id, camera_id, user_id, level):
 _SELECT_DUE = """
     SELECT d.id, d.attempts, d.created_at < now() - make_interval(mins => %s) AS stale,
            ch.id::text AS channel_id, ch.chat_id, ch.is_active,
+           d.audience, e.id AS event_id, e.status AS event_status,
+           COALESCE(ROUND(EXTRACT(EPOCH FROM (e.escalate_at - e.created_at)))::int, 0) AS review_secs,
            e.level, e.camera_id::text AS camera_id,
            to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'DD/MM/YYYY HH24:MI') AS cuando,
            c.name AS camera_name, c.place AS camera_place,
@@ -322,31 +339,69 @@ _SELECT_DUE = """
 """
 
 
-def build_text(d) -> str:
-    icono, nombre = ("🚨", "ALTA") if d["level"] == "ALTO" else ("⚠️", "MEDIA")
+def _minutos(segundos) -> str:
+    segundos = int(segundos or 0)
+    if segundos >= 90:
+        m = round(segundos / 60)
+        return f"{m} minuto{'s' if m != 1 else ''}"
+    return f"{segundos} segundos"
+
+
+def _cuerpo(d) -> str:
     camara = d["camera_name"] or "sin cámara asignada"
     if d["camera_place"]:
         camara += f" ({d['camera_place']})"
-    return (f"{icono} Alerta {nombre}\n"
-            f"Cámara: {camara}\n"
+    return (f"Cámara: {camara}\n"
             f"Motivo: {d['reasons'] or 'actividad detectada'}\n"
             f"Hora: {d['cuando']} (hora de Lima)")
 
 
-def _markup(d):
+def build_text(d) -> str:
+    icono, nombre = ("🚨", "ALTA") if d["level"] == "ALTO" else ("⚠️", "MEDIA")
+    cuerpo = _cuerpo(d)
+    audiencia = d.get("audience") or "normal"
+    if audiencia == "review":
+        return (f"{icono} Alerta {nombre} POR REVISAR\n{cuerpo}\n\n"
+                f"Confirma o descarta. Si nadie responde en {_minutos(d.get('review_secs'))}, se avisará a los vecinos como NO VERIFICADA.")
+    if audiencia == "broadcast":
+        return f"✅ Alerta {nombre} CONFIRMADA por un administrador\n{cuerpo}"
+    if audiencia == "escalated":
+        return f"⚠️ Alerta {nombre} NO VERIFICADA: ningún administrador la revisó a tiempo\n{cuerpo}"
+    return f"{icono} Alerta {nombre}\n{cuerpo}"
+
+
+def build_result_text(d, modo) -> str:
+    """El mensaje que ven los administradores cuando la alerta ya se resolvió (confirmar, descartar) o se escaló (escalada)."""
+    icono, nombre = ("🚨", "ALTA") if d["level"] == "ALTO" else ("⚠️", "MEDIA")
+    quien = d.get("revisor") or "un administrador"
+    if modo == "confirmar":
+        cabecera = f"✅ Alerta {nombre} CONFIRMADA por {quien} a las {d.get('revisada') or '--:--'}. Se avisó a los vecinos."
+    elif modo == "descartar":
+        cabecera = f"🚫 Alerta {nombre} DESCARTADA como falsa alarma por {quien} a las {d.get('revisada') or '--:--'}."
+    else:
+        cabecera = (f"{icono} Alerta {nombre} POR REVISAR\n⏱ Nadie respondió a tiempo: se avisó a los vecinos como NO VERIFICADA. "
+                    "Todavía puedes confirmarla o descartarla.")
+    return f"{cabecera}\n{_cuerpo(d)}"
+
+
+def _markup(d, botones=True):
+    filas = []
+    if botones and d.get("audience") == "review" and d.get("event_status") == "sin verificar":
+        filas.append([{"text": "✅ Confirmar", "callback_data": f"rv:{d['event_id']}:c"},
+                      {"text": "🚫 Descartar", "callback_data": f"rv:{d['event_id']}:d"}])
     base = _cfg["base_url"]
     if d["camera_id"] and base.startswith("https://"):           # Telegram solo acepta enlaces seguros
-        return {"inline_keyboard": [[{"text": "Ver cámara", "url": f"{base}/cameras/{d['camera_id']}"}]]}
-    return None
+        filas.append([{"text": "Ver cámara", "url": f"{base}/cameras/{d['camera_id']}"}])
+    return {"inline_keyboard": filas} if filas else None
 
 
 def _send(d):
+    """Envía el aviso. Devuelve (la respuesta de Telegram, si llevaba foto)."""
     texto, markup = build_text(d), _markup(d)
     ruta = os.path.join(_cfg["evidence_dir"], os.path.basename(d["image"])) if d["image"] else None
     if ruta and os.path.exists(ruta):
-        _client.send_photo(d["chat_id"], ruta, texto, markup)
-    else:
-        _client.send_message(d["chat_id"], texto, markup)
+        return _client.send_photo(d["chat_id"], ruta, texto, markup), True
+    return _client.send_message(d["chat_id"], texto, markup), False
 
 
 def _finish(cur, d, status, error):
@@ -375,16 +430,20 @@ def process_one() -> bool:
             _finish(cur, d, "failed", "caducó: no salió a tiempo")
         elif not d["is_active"]:
             _finish(cur, d, "failed", "el canal está en pausa o desactivado")
+        elif d["audience"] == "review" and d["event_status"] != "sin verificar":
+            _finish(cur, d, "failed", "la alerta ya fue revisada antes de enviarse")
         else:
             try:
-                _send(d)
+                resultado, con_foto = _send(d)
             except telegram_api.TelegramError as ex:
                 _failed_attempt(cur, d, ex)
             except Exception as ex:
                 _failed_attempt(cur, d, telegram_api.TelegramError(0, telegram_api.clean(ex, _cfg["token"])))
             else:
-                cur.execute("""UPDATE alert_deliveries SET status = 'sent', attempts = attempts + 1,
-                                      sent_at = now(), last_error = NULL WHERE id = %s""", (d["id"],))
+                mensaje = resultado.get("message_id") if isinstance(resultado, dict) else None
+                cur.execute("""UPDATE alert_deliveries SET status = 'sent', attempts = attempts + 1, sent_at = now(),
+                                      last_error = NULL, telegram_message_id = %s, has_photo = %s WHERE id = %s""",
+                            (mensaje, con_foto, d["id"]))
     return True
 
 
@@ -397,6 +456,169 @@ def worker_forever(stop):
             log.exception("Fallo en la cola de alertas")
             stop.wait(5)
         stop.wait(2)
+
+
+# ------------------------------------------------------------------ revisión del administrador (H6)
+
+_RV = re.compile(r"^rv:(\d{1,18}):([cd])$")
+_SELECT_MENSAJES = """
+    SELECT ch.chat_id, d.telegram_message_id AS message_id, d.has_photo, d.audience,
+           e.id AS event_id, e.level, e.status AS event_status, e.camera_id::text AS camera_id,
+           to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'DD/MM/YYYY HH24:MI') AS cuando,
+           c.name AS camera_name, c.place AS camera_place,
+           COALESCE((SELECT string_agg(s.description, ', ' ORDER BY s.code)
+                     FROM event_signals es JOIN signals s ON s.code = es.signal_code WHERE es.event_id = e.id), '') AS reasons,
+           (SELECT u.full_name FROM users u WHERE u.id = e.reviewed_by) AS revisor,
+           to_char(e.reviewed_at AT TIME ZONE 'America/Lima', 'HH24:MI') AS revisada
+    FROM alert_deliveries d
+    JOIN notification_channels ch ON ch.id = d.channel_id
+    JOIN events e ON e.id = d.event_id
+    LEFT JOIN cameras c ON c.id = e.camera_id
+    WHERE d.event_id = %s AND d.audience = 'review' AND d.status = 'sent' AND d.telegram_message_id IS NOT NULL
+"""
+
+
+def set_siren(funcion):
+    """app.py indica aquí cómo se hace sonar la sirena (la misma que usan las demás alertas)."""
+    global _siren
+    _siren = funcion
+
+
+def enqueue_community(cur, event_id, community_id, level, audience, excluir=None):
+    """
+    Deja en cola el aviso para TODA la comunidad (según el nivel mínimo de cada quien), menos para quien ya recibió
+    uno de este evento (los administradores que lo revisaron) y para `excluir` (quien acaba de revisarlo: ya lo sabe).
+    Devuelve cuántos avisos se crearon.
+    """
+    cur.execute("""
+        INSERT INTO alert_deliveries (event_id, channel_id, audience)
+        SELECT %(event)s, ch.id, %(audience)s
+        FROM notification_channels ch
+        JOIN users u ON u.id = ch.user_id AND u.status = 'active'
+        WHERE ch.kind = 'telegram' AND ch.is_active AND ch.verified_at IS NOT NULL AND ch.chat_id IS NOT NULL
+          AND u.community_id = %(community)s::uuid AND (ch.min_level = 'MEDIO' OR %(level)s = 'ALTO')
+          AND NOT EXISTS (SELECT 1 FROM alert_deliveries d WHERE d.event_id = %(event)s AND d.channel_id = ch.id)
+          AND (%(excluir)s::uuid IS NULL OR ch.user_id <> %(excluir)s::uuid)""",
+                {"event": event_id, "audience": audience, "community": str(community_id), "level": level, "excluir": excluir})
+    return cur.rowcount
+
+
+def on_review_applied(cur, res):
+    """Dentro de la misma transacción que guarda la revisión: si se confirmó, los avisos a los vecinos quedan en cola."""
+    if res["decision"] == "confirmar" and not res["escalada"]:
+        res["avisados"] = enqueue_community(cur, res["event_id"], res["community_id"], res["level"], "broadcast", excluir=res["admin_id"])
+
+
+def _editar_mensaje(m, modo):
+    d = dict(m)
+    texto = build_result_text(d, modo)
+    markup = _markup(d, botones=(modo == "escalada")) or {"inline_keyboard": []}
+    try:
+        if m["has_photo"]:
+            _client.edit_message_caption(m["chat_id"], m["message_id"], texto, markup)
+        else:
+            _client.edit_message_text(m["chat_id"], m["message_id"], texto, markup)
+    except telegram_api.TelegramError as ex:
+        if ex.blocked or "not modified" in ex.description.lower():
+            return
+        log.warning("No se pudo actualizar un mensaje de revisión: %s", ex.description)
+
+
+def _editar_mensajes(event_id, modo):
+    """Cambia el mensaje que recibió cada administrador: sin botones y diciendo qué pasó (o que se escaló)."""
+    with db.cursor() as cur:
+        cur.execute(_SELECT_MENSAJES, (event_id,))
+        mensajes = [dict(r) for r in cur.fetchall()]
+    for m in mensajes:
+        _editar_mensaje(m, modo)
+
+
+def after_review(res, admin=None):
+    """Lo que sigue DESPUÉS de guardar la revisión: la sirena (si se confirmó) y actualizar los mensajes de los administradores."""
+    try:
+        if res["decision"] == "confirmar" and _siren is not None:
+            try:
+                _siren()
+            except Exception:
+                log.exception("No se pudo activar la sirena")
+        if available():
+            _editar_mensajes(res["event_id"], res["decision"])
+    except Exception:
+        log.exception("Falló la actualización de una revisión")
+
+
+def _admin_of_chat(chat_id):
+    with db.cursor() as cur:
+        cur.execute("""SELECT u.id::text AS id, u.community_id::text AS community_id
+                       FROM notification_channels ch JOIN users u ON u.id = ch.user_id AND u.status = 'active'
+                       WHERE ch.kind = 'telegram' AND ch.chat_id = %s AND ch.verified_at IS NOT NULL AND ch.is_active
+                         AND u.role = 'community_admin' LIMIT 1""", (str(chat_id),))
+        fila = cur.fetchone()
+    return dict(fila) if fila else None
+
+
+def handle_callback(cb):
+    """Un clic en «Confirmar» o «Descartar». Solo cuenta si viene del chat privado de un administrador de la comunidad del evento."""
+    cid = cb.get("id")
+
+    def responder(texto, alerta=False):
+        if cid:
+            try:
+                _client.answer_callback_query(cid, texto, alerta)
+            except telegram_api.TelegramError as ex:
+                log.warning("No se pudo responder al botón: %s", ex.description)
+
+    chat = (cb.get("message") or {}).get("chat") or {}
+    m = _RV.match(str(cb.get("data") or ""))
+    if (m is None or chat.get("type") != "private" or chat.get("id") is None
+            or str((cb.get("from") or {}).get("id")) != str(chat["id"])):
+        responder("Esa acción no es válida.")
+        return
+    decision = "confirmar" if m.group(2) == "c" else "descartar"
+    try:
+        admin = _admin_of_chat(chat["id"])
+        if admin is None:
+            responder("Solo un administrador de la comunidad puede revisar alertas.", True)
+            return
+        res = hitl.review_event(admin, int(m.group(1)), decision, "telegram", on_applied=on_review_applied)
+    except hitl.ReviewError:
+        responder("Esa alerta ya no está disponible.", True)           # no existe, o es de otra comunidad: se responde igual
+        return
+    except Exception:
+        log.exception("No se pudo registrar la revisión")
+        responder("No se pudo registrar. Inténtalo de nuevo en un momento.", True)
+        return
+    if not res["applied"]:
+        responder(f"Esta alerta ya fue revisada: {res['estado']}.")
+        return
+    responder("Confirmada: se avisó a los vecinos." if decision == "confirmar" else "Descartada como falsa alarma.")
+    threading.Thread(target=after_review, args=(res, admin), name="revision-envio", daemon=True).start()
+
+
+def _on_escalated(cur, ev):
+    ev["avisados"] = enqueue_community(cur, ev["id"], ev["community_id"], ev["level"], "escalated")
+
+
+def escalate_once() -> int:
+    """Escala las alertas cuyo tiempo se cumplió sin respuesta: avisa a todos como «no verificada» y lo anota en los mensajes de los administradores."""
+    escaladas = hitl.escalate_due(_on_escalated)
+    for ev in escaladas:
+        log.warning("Alerta %s sin respuesta de los administradores: se avisó a %d persona(s) como NO VERIFICADA.", ev["id"], ev.get("avisados", 0))
+        if available():
+            try:
+                _editar_mensajes(ev["id"], "escalada")
+            except Exception:
+                log.exception("No se pudo anotar el escalado en los mensajes de los administradores")
+    return len(escaladas)
+
+
+def escalation_forever(stop):
+    while not stop.is_set():
+        try:
+            escalate_once()
+        except Exception:
+            log.exception("Fallo al escalar alertas sin revisar")
+        stop.wait(15)
 
 
 def _send_text(chat_id, text):
@@ -415,6 +637,7 @@ def start(polling=True):
         return
     _stop.clear()
     for nombre, destino in (("alertas-cola", worker_forever), ("alertas-camaras", camera_watch_forever),
+                            ("alertas-escalado", escalation_forever),
                             ("alertas-sondeo", poll_forever if polling else None)):
         if destino:
             t = threading.Thread(target=destino, args=(_stop,), name=nombre, daemon=True)
