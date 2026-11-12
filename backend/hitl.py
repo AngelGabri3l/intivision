@@ -158,6 +158,15 @@ def pending(admin) -> dict:
     return {"count": len(filas), "events": filas}
 
 
+def pending_count(admin) -> int:
+    """Cuántas alertas esperan revisión en la comunidad (para el número del menú). Usa el índice parcial de la migración 003."""
+    with db.cursor() as cur:
+        cur.execute("""SELECT count(*) AS n FROM events
+                       WHERE community_id = %s AND status = 'sin verificar' AND escalate_at IS NOT NULL""",
+                    (str(admin["community_id"]),))
+        return int(cur.fetchone()["n"])
+
+
 def escalate_due(on_escalated=None, limit: int = 20) -> list:
     """
     Marca como escaladas las revisiones cuyo tiempo se cumplió y que nadie resolvió. Cada una se escala UNA sola vez.

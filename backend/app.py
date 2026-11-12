@@ -458,7 +458,7 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts"))
+    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
@@ -623,6 +623,13 @@ async def admin_review(event_id: str, request: Request, user: dict = Depends(aut
                                                       "error": "Esta alerta ya fue revisada."})
     threading.Thread(target=alerts.after_review, args=(res, user), name="revision-envio", daemon=True).start()
     return JSONResponse(content={"ok": True, "estado": res["estado"]})
+
+
+@app.get("/admin/pendientes", response_class=HTMLResponse)
+def pending_page(request: Request, user: dict = Depends(auth.require_admin)):
+    """La pantalla «Pendientes de revisión» (H9). Es solo para administradores y usa la API de /admin/review."""
+    nonce = request.state.csp_nonce
+    return HTMLResponse(pwa.inject(pages.render_pending(user, nonce), nonce))
 
 
 # ---------------------- imagen en vivo de la mini PC (H7) y PWA ----------------------
@@ -973,7 +980,7 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
     with db.cursor() as cur:
         if user["role"] == "community_admin":
             cur.execute(
-                """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
+                """SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
                    WHERE m.storage_key = %s AND m.community_id = %s
                      AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)""",
                 (safe, user["community_id"], user["id"]))
@@ -986,13 +993,15 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
         path = os.path.join(EVIDENCE_DIR, safe)
         if row is None or not os.path.exists(path):
             return JSONResponse(status_code=404, content={"error": "no encontrado"})
-        if user["role"] == "community_admin" and row["user_id"] != user["id"]:
-            # Queda registro de que el administrador abrió una imagen de otra persona.
+        dueno = row.get("camera_owner") or row["user_id"]     # de quién es la imagen: el dueño de la cámara o quien la subió
+        if user["role"] == "community_admin" and dueno is not None and str(dueno) != str(user["id"]):
+            # Queda registro de que el administrador abrió una imagen de otra persona. Las de una zona común no tienen dueño:
+            # se miran todo el día desde «Pendientes» y no hay a quién anotar.
             cur.execute(
                 """INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id,
                                           action, entity, entity_id, ip)
                    VALUES ('user', %s, %s, %s, 'view_evidence', 'media_file', %s, %s)""",
-                (user["id"], user["community_id"], row["user_id"], safe,
+                (user["id"], user["community_id"], dueno, safe,
                  auth._clean_ip(request.client.host if request.client else None)))
     return FileResponse(path)
 
@@ -1144,5 +1153,5 @@ def home(request: Request, user: dict = Depends(auth.current_user)):
         opciones = f'<option value="">Se creará «Cámara de {pages.esc(user["full_name"])}» automáticamente</option>'
     return HTMLResponse(
         fill(template, usuario=f'{html.escape(user["full_name"])} · {rol}', cards=cards,
-             nonce=request.state.csp_nonce, camara_opciones=opciones),
+             nonce=request.state.csp_nonce, camara_opciones=opciones, pendientes=pages.pending_link(user)),
         headers={"Cache-Control": "no-store"})

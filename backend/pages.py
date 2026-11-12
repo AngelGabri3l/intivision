@@ -4,11 +4,14 @@ que escribió un usuario se escapa antes de entrar a la página.
 """
 import datetime
 import html
+import logging
 import os
 import re
 from urllib.parse import urlencode
 
-from backend import alerts, cameras
+from backend import alerts, cameras, hitl
+
+log = logging.getLogger("pages")
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 SOURCE_LABELS = {"browser": "Cámara web", "video": "Video", "edge": "Mini PC"}
@@ -36,13 +39,29 @@ def role_text(user) -> str:
     return "Administrador" if user["role"] == "community_admin" else "Residente"
 
 
+def pending_link(user, active=None) -> str:
+    """
+    El enlace «Pendientes (n)» del menú, solo para administradores. Si la base de datos falla, la página sigue
+    funcionando: el enlace aparece sin número.
+    """
+    if user.get("role") != "community_admin":
+        return ""
+    try:
+        n = hitl.pending_count(user)
+    except Exception:
+        log.warning("No se pudo contar las alertas pendientes para el menú", exc_info=True)
+        n = 0
+    actual = ' aria-current="page"' if active == "pendientes" else ""
+    return f'<a class="volver" id="nav-pendientes" href="/admin/pendientes"{actual}>Pendientes{f" ({n})" if n else ""}</a>'
+
+
 def nav(user, active) -> str:
     def link(href, text, key):
         actual = ' aria-current="page"' if key == active else ""
         return f'<a class="volver" href="{href}"{actual}>{text}</a>'
     return (f'<span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
             + link("/", "Analizar", "analizar") + link("/cameras", "Cámaras", "camaras")
-            + link("/alerts", "Alertas", "alertas")
+            + link("/alerts", "Alertas", "alertas") + pending_link(user, active)
             + '<form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>')
 
 
@@ -234,6 +253,12 @@ def delivery_row(r) -> str:
     return (f'<div class="aviso">{level_badge(r["level"])}<span class="aviso__camara">{esc(r["camera_name"] or "Sin cámara")}</span>'
             f'<span class="aviso__fecha">{esc(r["cuando"])}</span>'
             f'<span class="aviso__estado aviso__estado--{tipo}"{detalle}>{texto}</span></div>')
+
+
+def render_pending(user, nonce) -> str:
+    """La pantalla «Pendientes de revisión» (H9). Las alertas las pide el navegador a /admin/review/pending."""
+    return fill(read_template("pendientes.html"), nav=nav(user, "pendientes"), nonce=esc(nonce),
+                script=read_template("pendientes.js"))
 
 
 def _linked_panel(channel) -> str:
