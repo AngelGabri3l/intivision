@@ -14,6 +14,10 @@ services:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_POLLING=${TELEGRAM_POLLING:-1}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - LIVE_MAX_VIEWERS=${LIVE_MAX_VIEWERS:-3}        # imagen en vivo (H7): personas mirando una misma cámara a la vez
+      - LIVE_MAX_VISIT_S=${LIVE_MAX_VISIT_S:-300}      # duración máxima de una visita al visor, en segundos
+      - LIVE_MAX_STREAMS=${LIVE_MAX_STREAMS:-4}        # cámaras en vivo a la vez por mini PC (protege su procesador)
+      - LIVE_FPS=${LIVE_FPS:-5}                        # cuadros por segundo que se le piden a la mini PC
       - MQTT_USERNAME=${MQTT_USERNAME:-}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-}
     volumes:

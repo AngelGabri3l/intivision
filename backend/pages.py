@@ -150,7 +150,15 @@ def filter_link(cam_id, nivel, desde, hasta, limite) -> str:
     return f"/cameras/{cam_id}?{urlencode(params)}"
 
 
-def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None) -> str:
+def live_block(cam, nonce) -> str:
+    """El visor en vivo de la ficha. Las cámaras del navegador no tienen mini PC: no llevan visor."""
+    if cam.get("source_type") == "browser":
+        return ""
+    return fill(read_template("vivo.html"), nonce=esc(nonce),
+                script=fill(read_template("vivo.js"), camera_id=esc(cam["id"])))
+
+
+def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="") -> str:
     es_dueno = cam["user_id"] == user["id"]
     admin = user["role"] == "community_admin"
     filtrando = bool(nivel or desde or hasta)
@@ -212,7 +220,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
         nombre=esc(cam["name"]), lugar=esc(cam["place"]) if cam["place"] else "Sin lugar indicado.",
         aviso=alert_block(message, "alerta"), resumen=resumen, datos=datos, visibilidad=visibilidad,
         filtros=filtros, total=esc(count_text(len(events), "evento", "eventos")) + ("+" if has_more else ""),
-        eventos=lista, mas=mas)
+        eventos=lista, mas=mas, vivo=live_block(cam, nonce))
 
 
 # ------------------------------------------------------------------ alertas por Telegram

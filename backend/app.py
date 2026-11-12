@@ -17,18 +17,19 @@ import psycopg2
 import psycopg2.pool
 from fastapi import (FastAPI, UploadFile, File, Request, WebSocket,
                      WebSocketDisconnect, Depends, Form)
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import db, auth, cameras, pages, alerts, sources, ingest_media  # noqa: E402
+from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE, "backend", "data")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 EVIDENCE_DIR = os.path.join(BASE, "events")  # compartido con el detector
+live.configure(EVIDENCE_DIR)
 CONFIG_PATH = os.path.join(BASE, "config.yaml")
 TEMPLATES_DIR = os.path.join(BASE, "backend", "templates")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))   # igual que el límite de la página
@@ -145,8 +146,13 @@ def validate_event(e):
     return out, None
 
 
-def content_security_policy(nonce):
-    """Política del navegador: solo el script de la página (con su clave de un solo uso), nada de terceros."""
+def content_security_policy(nonce, host=None, secure=True):
+    """Política del navegador: solo el script de la página (con su clave de un solo uso), nada de terceros.
+    El WebSocket de la imagen en vivo es del mismo sitio; se nombra su dirección además de 'self' porque algunos Safari
+    antiguos no consideran que 'self' cubra a ws:// y wss://."""
+    conexion = "connect-src 'self'"
+    if host and re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?", host):
+        conexion += f" {'wss' if secure else 'ws'}://{host}"
     return "; ".join([
         "default-src 'none'",
         f"script-src 'nonce-{nonce}'",
@@ -154,7 +160,9 @@ def content_security_policy(nonce):
         "font-src https://fonts.gstatic.com data:",
         "img-src 'self' data: blob:",
         "media-src 'self' blob:",
-        "connect-src 'self'",
+        "manifest-src 'self'",
+        "worker-src 'self'",
+        conexion,
         "form-action 'self'",
         "base-uri 'none'",
         "frame-ancestors 'none'",
@@ -186,12 +194,17 @@ def apply_security_headers(request: Request, response):
     h["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
     h["Cross-Origin-Opener-Policy"] = "same-origin"
     h["Cross-Origin-Resource-Policy"] = "same-origin"
-    # Las fotos pueden guardarse un rato en el navegador de su dueño; todo lo demás, nunca.
-    h["Cache-Control"] = "private, max-age=600" if request.url.path.startswith("/evidence/") else "no-store"
+    # Las fotos pueden guardarse un rato en el navegador de su dueño y los íconos de la PWA en el de cualquiera; todo lo demás, nunca.
+    ruta = request.url.path
+    h["Cache-Control"] = ("private, max-age=600" if ruta.startswith("/evidence/")
+                          else "public, max-age=86400" if ruta.startswith("/icons/") else "no-store")
     if auth.cookie_is_secure(request):
         h["Strict-Transport-Security"] = "max-age=31536000"
     if h.get("content-type", "").startswith("text/html"):
-        h["Content-Security-Policy"] = content_security_policy(request.state.csp_nonce)
+        h["Content-Security-Policy"] = content_security_policy(request.state.csp_nonce, request.headers.get("host"), auth.cookie_is_secure(request))
+    elif ruta == "/sw.js":
+        # el service worker hereda esta política: necesita pedir cosas al mismo sitio (para mostrar «sin conexión»)
+        h["Content-Security-Policy"] = "default-src 'none'; connect-src 'self'; frame-ancestors 'none'"
     else:
         h["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
 
@@ -569,6 +582,49 @@ def health():
         return JSONResponse(status_code=503, content={"status": "degradado", "db": "error"})
 
 
+# ---------------------- imagen en vivo de la mini PC (H7) y PWA ----------------------
+
+@app.websocket("/edge/ws")
+async def edge_ws(ws: WebSocket):
+    """La mini PC abre y mantiene esta conexión; por aquí se le pide imagen y por aquí la envía (ver backend/live.py)."""
+    await live.handle_edge(ws)
+
+
+@app.websocket("/ws/camera/{camera_id}")
+async def camera_ws(ws: WebSocket, camera_id: str):
+    """El celular de quien tiene permiso mira la cámara en vivo."""
+    await live.handle_viewer(ws, camera_id)
+
+
+@app.get("/cameras/{camera_id}/ultima.jpg")
+def camera_last_image(camera_id: str, user: dict = Depends(auth.current_user)):
+    """La última imagen de la cámara (también es el plan B del visor: una foto cada 2 segundos)."""
+    return live.last_image_response(user, camera_id)
+
+
+@app.get("/manifest.webmanifest")
+def pwa_manifest():
+    return Response(content=json.dumps(pwa.manifest(), ensure_ascii=False), media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def pwa_service_worker():
+    return Response(content=pwa.SERVICE_WORKER, media_type="application/javascript", headers={"Service-Worker-Allowed": "/"})
+
+
+@app.get("/offline.html", response_class=HTMLResponse)
+def pwa_offline():
+    return HTMLResponse(pwa.OFFLINE_HTML)
+
+
+@app.get("/icons/{nombre}")
+def pwa_icon(nombre: str):
+    datos = pwa.icono(nombre)
+    if datos is None:
+        return JSONResponse(status_code=404, content={"error": "no encontrado"})
+    return Response(content=datos, media_type="image/png")
+
+
 # ---------------------- CÁMARA EN VIVO ----------------------
 
 def _process_frame(session, data, user, camera_id):
@@ -914,8 +970,8 @@ def _camera_not_found(user):
 
 
 @app.get("/cameras", response_class=HTMLResponse)
-def cameras_page(user: dict = Depends(auth.current_user)):
-    return HTMLResponse(pages.render_cameras(user, cameras.list_cameras(user)))
+def cameras_page(request: Request, user: dict = Depends(auth.current_user)):
+    return HTMLResponse(pwa.inject(pages.render_cameras(user, cameras.list_cameras(user)), request.state.csp_nonce))
 
 
 @app.post("/cameras", response_class=HTMLResponse)
@@ -944,9 +1000,9 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
                 """INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id, ip)
                    VALUES ('user', %s, %s, %s, 'view_camera', 'camera', %s, %s)""",
                 (user["id"], user["community_id"], cam["user_id"], cam["id"], auth._clean_ip(auth.client_ip(request))))
-    return HTMLResponse(pages.render_camera(
+    return HTMLResponse(pwa.inject(pages.render_camera(
         user, cam, rows[:limite], nivel, desde if d_desde else "", hasta if d_hasta else "", limite,
-        len(rows) > limite, aviso))
+        len(rows) > limite, aviso, nonce=request.state.csp_nonce), request.state.csp_nonce))
 
 
 @app.post("/cameras/{camera_id}/visibilidad")
