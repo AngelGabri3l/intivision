@@ -203,7 +203,8 @@ def cmd_motor(args, cfg) -> int:
     carga = time.perf_counter() - inicio
     print(f"motor cargado en {carga:.1f} s | python {sys.version.split()[0]}, torch {_version('torch')}, ultralytics {_version('ultralytics')}, "
           f"opencv {cv2.__version__}, numpy {np.__version__}")
-    print(f"modelos cargados: personas | postura: {'activada' if motor.pose else 'apagada'} | memoria: {_memoria_mb()} MB")
+    print(f"modelos cargados: {'personas y postura en un solo modelo' if getattr(motor, 'single_model', False) else 'personas'} | "
+          f"postura: {'activada' if motor.pose else 'apagada'} | memoria: {_memoria_mb()} MB")
     rng = np.random.RandomState(0)
     cuadro = np.clip(np.linspace(0, 255, 640 * 480 * 3).reshape(480, 640, 3) + rng.randint(0, 40, (480, 640, 3)), 0, 255).astype(np.uint8)
 
@@ -216,8 +217,13 @@ def cmd_motor(args, cfg) -> int:
             tiempos.append((time.perf_counter() - t0) * 1000)
         return sorted(tiempos)[len(tiempos) // 2]
 
-    ms_personas = medir(lambda: motor.detector.detect(cuadro))
-    ms_pose = medir(lambda: motor.pose.analyze(cuadro)) if motor.pose else 0.0
+    unico = getattr(motor, "single_model", False)
+    if unico:       # modelo único: el de postura detecta a las personas, así que no hay detector aparte
+        ms_personas = 0.0
+        ms_pose = medir(lambda: motor.pose.detect_and_analyze(cuadro, motor.person_conf))
+    else:
+        ms_personas = medir(lambda: motor.detector.detect(cuadro))
+        ms_pose = medir(lambda: motor.pose.analyze(cuadro)) if motor.pose else 0.0
     tmp = tempfile_dir(cfg)
     try:
         sesion = motor.new_session(tmp)
@@ -225,8 +231,12 @@ def cmd_motor(args, cfg) -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     peor = ms_personas + ms_pose
-    print(f"un cuadro de 640x480 tarda: detectar personas {ms_personas:.0f} ms" + (f" | postura (solo si hay una persona) {ms_pose:.0f} ms" if motor.pose else "")
-          + f" | análisis completo sin personas {ms_total:.0f} ms")
+    if unico:
+        print(f"un cuadro de 640x480 tarda: personas y postura en una sola pasada {ms_pose:.0f} ms (siempre, haya o no gente)"
+              + f" | análisis completo {ms_total:.0f} ms")
+    else:
+        print(f"un cuadro de 640x480 tarda: detectar personas {ms_personas:.0f} ms" + (f" | postura (solo si hay una persona) {ms_pose:.0f} ms" if motor.pose else "")
+              + f" | análisis completo sin personas {ms_total:.0f} ms")
     print(f"con una persona delante (peor caso): ~{peor:.0f} ms por cuadro, es decir, hasta ~{1000 / max(peor, 1):.1f} cuadros por segundo en total entre todas las cámaras")
     objetivo = cfg.analysis_fps
     if peor > 1000 / objetivo:

@@ -64,7 +64,10 @@ def main():
         loitering_radius_h=sc.get("loitering_radius_h", 0.8),
         proximity_ratio=sc.get("proximity_ratio", 0.6),
         proximity_seconds=sc.get("proximity_seconds", 1.5),
-        tracking=sc.get("tracking"))
+        tracking=sc.get("tracking"),
+        posture_hold_s=sc.get("posture_hold_s"),
+        posture_gap_s=sc.get("posture_gap_s", 2.0),
+        posture_min_ratio=sc.get("posture_min_ratio", 0.65))
     zone = sc.get("restricted_zone") or []
 
     actuator = build_actuator(cfg)
@@ -115,7 +118,7 @@ def main():
                 pose_results = pose_detector.analyze(frame)
                 for pr in pose_results:
                     postures |= pr["postures"]
-            result = scorer.evaluate(detections, now_ts, now_dt, postures)
+            result = scorer.evaluate(detections, now_ts, now_dt, pose_results if (pose_detector and detections) else None)
             level = result["level"]
 
             for d in detections:

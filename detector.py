@@ -1,16 +1,18 @@
 class PersonDetector:
     PERSON_CLASS_ID = 0
 
-    def __init__(self, model_path="yolo11n.pt", conf=0.5, device=None):
+    def __init__(self, model_path="yolo11n.pt", conf=0.5, device=None, imgsz=None):
         from ultralytics import YOLO  # import diferido
         self.model = YOLO(model_path)
         self.conf = conf
         self.device = device
+        self.imgsz = imgsz            # tamaño de entrada del modelo; None = el de fábrica del modelo (640)
 
     def detect(self, frame):
+        extra = {"imgsz": self.imgsz} if self.imgsz else {}
         results = self.model.predict(frame, conf=self.conf,
                                      classes=[self.PERSON_CLASS_ID],
-                                     verbose=False, device=self.device)
+                                     verbose=False, device=self.device, **extra)
         detections = []
         for r in results:
             for box in r.boxes:

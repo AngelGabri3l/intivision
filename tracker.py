@@ -31,7 +31,7 @@ def _caja(det):
     return (x1, y1, x2, y2)
 
 
-def _iou(a, b):
+def iou(a, b):
     ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
     inter = ix * iy
@@ -111,7 +111,7 @@ class PersonTracker:
                 dist = math.hypot((caja[0] + caja[2]) / 2.0 - t.cx, (caja[1] + caja[3]) / 2.0 - t.cy) / max(t.h, altura)
                 if dist > puerta:
                     continue
-                candidatos.append((dist / puerta - 0.3 * _iou(t.bbox, caja), tid, j))
+                candidatos.append((dist / puerta - 0.3 * iou(t.bbox, caja), tid, j))
         candidatos.sort()                                   # primero los pares más parecidos; los empates se resuelven por orden estable
 
         usados_t, usados_d = set(), set()

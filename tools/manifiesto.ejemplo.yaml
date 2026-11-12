@@ -1,0 +1,84 @@
+# Manifiesto de ejemplo para tools/evaluar_clips.py.
+#
+# Copia este archivo junto a tus clips (por ejemplo en clips/manifiesto.yaml) y ajusta los nombres. Los clips tienen personas: se graban con su
+# consentimiento y NO se suben al repositorio (van al ticket de la historia).
+#
+# Cada clip puede llevar:
+#   archivo      nombre del video, relativo a este manifiesto
+#   descripcion  una línea para acordarte qué pasa en el clip
+#   hora         HH:MM de Lima (para el horario sensible; por defecto 12:00)
+#   zona         polígono de la zona restringida, [[x, y], ...] en píxeles del clip (por defecto, todo el cuadro)
+#   esperado:
+#     nivel_minimo / nivel_maximo   NINGUNO, BAJO, MEDIO o ALTO: entre qué niveles debe quedar el clip
+#     debe_tener                    señales que DEBEN aparecer
+#     no_debe_tener                 señales que NO deben aparecer (si aparecen, es una falsa alarma)
+# Un clip sin 'esperado' solo se registra (sale como INFO): sirve para ver qué hace el motor antes de decidir qué esperar.
+#
+# Las señales: person_present, in_restricted_zone, sensitive_hour, loitering, group, proximity, climbing, fallen, hands_up.
+
+# config: ../config.yaml          # opcional: la configuración del motor con la que se mide (por defecto, la del proyecto)
+
+clips:
+  - archivo: sentado_laptop.mp4
+    descripcion: Una persona sentada frente a la laptop, unos 30 s
+    hora: "14:00"
+    esperado:
+      nivel_maximo: MEDIO          # sentada más de 15 s sí cuenta como merodeo, pero no debe pasar de ahí
+      no_debe_tener: [fallen, hands_up, climbing, proximity, group]
+
+  - archivo: pasar_caminando.mp4
+    descripcion: Una persona cruza el cuadro caminando sin detenerse
+    esperado:
+      nivel_maximo: BAJO
+      no_debe_tener: [loitering, fallen, hands_up, climbing]
+
+  - archivo: merodear_20s.mp4
+    descripcion: Una persona se queda parada 20 s en la zona
+    esperado:
+      nivel_minimo: MEDIO
+      debe_tener: [loitering]
+
+  - archivo: dos_personas_juntas.mp4
+    descripcion: Dos personas conversando muy juntas, de pie, unos 6 s, y se van
+    esperado:
+      nivel_maximo: BAJO
+      debe_tener: [proximity]
+      no_debe_tener: [group, fallen]
+
+  - archivo: dos_personas_lejos.mp4
+    descripcion: Dos personas en la misma escena pero separadas
+    esperado:
+      nivel_maximo: BAJO
+      no_debe_tener: [proximity, group]
+
+  - archivo: forcejeo_simulado.mp4
+    descripcion: Dos personas forcejeando (simulado) 20 s
+    esperado:
+      nivel_minimo: MEDIO          # sin las señales de movimiento solo llega a MEDIO si dura 15 s o más, o si alguien cae
+      debe_tener: [proximity]
+
+  - archivo: caida_simulada.mp4
+    descripcion: Una persona cae y se queda en el suelo unos 6 s
+    esperado:
+      nivel_minimo: MEDIO
+      debe_tener: [fallen]
+
+  - archivo: manos_arriba.mp4
+    descripcion: Una persona levanta las manos y las mantiene unos 3 s
+    esperado:
+      nivel_minimo: MEDIO
+      debe_tener: [hands_up]
+
+  - archivo: gesto_suelto.mp4
+    descripcion: Una persona se estira o saluda un instante (menos de 1 s) y sigue
+    esperado:
+      no_debe_tener: [hands_up, fallen, climbing]
+
+  - archivo: grupo_de_tres.mp4
+    descripcion: Tres personas paradas juntas en la zona
+    esperado:
+      nivel_minimo: MEDIO
+      debe_tener: [group]
+
+  - archivo: correr.mp4
+    descripcion: "Una persona corre por el cuadro (la señal de carrera todavía no existe: solo se registra qué hace el motor)"

@@ -7,6 +7,9 @@ detector:
   model: "yolo11n.pt"
   conf: 0.5
   device: null
+  # Tamaño de entrada del modelo. null = el de fábrica (640). Más chico (por ejemplo 416 o 320) analiza más rápido, pero ve peor a
+  # quien está lejos o es pequeño en la imagen: pruébalo con tus clips antes de dejarlo.
+  imgsz: null
 
 # ---- PUNTAJE DE AMENAZA ----
 scoring:
@@ -37,6 +40,14 @@ scoring:
     max_lost_s: 4.0         # cuánto tiempo se recuerda a una persona que dejó de detectarse
     min_hits: 2             # cuántas veces hay que detectarla para confirmarla (una detección de un solo cuadro no cuenta)
     loiter_gap_s: 2.0       # si no se ve a una persona más de estos segundos, su conteo de merodeo vuelve a empezar (puede ser otra persona)
+  # Posturas (trepar, en el suelo, manos arriba): se asignan a UNA persona y deben sostenerse estos segundos. Un gesto de un solo cuadro,
+  # o de personas distintas en cuadros distintos, no cuenta. Con 0 cuentan al instante (como antes de H3).
+  posture_hold_s:
+    fallen: 2.0             # «persona en el suelo»: una caída real se sostiene; agacharse o girar un momento no
+    hands_up: 1.0
+    climbing: 1.5
+  posture_gap_s: 2.0        # una postura que no se reconoce un cuadro suelto no se pierde si vuelve a verse antes de estos segundos
+  posture_min_ratio: 0.65   # ...pero debe verse en al menos esta fracción de los análisis del tramo: así las clasificaciones sueltas erróneas no se suman
   group_size: 3
   sensitive_hours: [22, 6]
   persistence_frames: 5
@@ -49,6 +60,13 @@ pose:
   model: "yolo11n-pose.pt"
   conf: 0.4
   device: null
+  imgsz: null           # igual que detector.imgsz, para el modelo de postura
+  # Cada cuántos análisis se corre la postura (1 = siempre, 2 = uno sí y uno no). La postura se sostiene entre medias, así que a 1 o 3
+  # cuadros por segundo casi no se nota, y ahorra la parte más pesada del análisis.
+  every_n: 1
+  # true = no se carga el detector de personas: el modelo de postura detecta a las personas y sus puntos en UNA sola pasada.
+  # Conviene cuando casi siempre hay gente a la vista; con la escena vacía casi todo el tiempo, el detector chico cuesta menos.
+  single_model: false
 
 analysis:
   sample_every: 3      

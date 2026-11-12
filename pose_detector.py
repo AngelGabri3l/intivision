@@ -77,16 +77,20 @@ def classify_posture(xy, kconf, bbox, min_conf=0.3):
 
 
 class PoseDetector:
-    def __init__(self, model_path="yolo11n-pose.pt", conf=0.4, device=None):
+    def __init__(self, model_path="yolo11n-pose.pt", conf=0.4, device=None, imgsz=None):
         from ultralytics import YOLO
         self.model = YOLO(model_path)
         self.conf = conf
         self.device = device
+        self.imgsz = imgsz            # tamaño de entrada del modelo; None = el de fábrica del modelo (640)
 
-    def analyze(self, frame):
-        results = self.model.predict(frame, conf=self.conf, verbose=False,
-                                     device=self.device)
-        out = []
+    def _predict(self, frame, conf):
+        extra = {"imgsz": self.imgsz} if self.imgsz else {}
+        return self.model.predict(frame, conf=conf, verbose=False, device=self.device, **extra)
+
+    @staticmethod
+    def _personas(results):
+        """Una entrada por persona que el modelo vio: su caja, su confianza y las posturas que se le reconocen."""
         for r in results:
             if r.keypoints is None or r.boxes is None:
                 continue
@@ -98,5 +102,27 @@ class PoseDetector:
                     bbox = [int(v) for v in r.boxes.xyxy[i].tolist()]
                 except (IndexError, AttributeError):
                     continue
-                out.append({"postures": classify_posture(xy, kconf, bbox), "bbox": bbox})
-        return out
+                try:
+                    conf = float(r.boxes.conf[i])
+                except (IndexError, AttributeError, TypeError, ValueError):
+                    conf = 1.0
+                yield {"bbox": bbox, "conf": conf, "postures": classify_posture(xy, kconf, bbox)}
+
+    def analyze(self, frame):
+        """Las posturas de CADA persona: [{"postures": {...}, "bbox": [x1, y1, x2, y2]}, ...]."""
+        return [{"postures": p["postures"], "bbox": p["bbox"]} for p in self._personas(self._predict(frame, self.conf))]
+
+    def detect_and_analyze(self, frame, person_conf=0.5):
+        """
+        Modo de modelo único: el modelo de postura hace de detector de personas. En UNA pasada devuelve (personas, posturas), con las personas en
+        el mismo formato que PersonDetector.detect y las posturas como analyze. Una persona cuenta si su confianza llega a `person_conf`;
+        su postura se reconoce si llega a la confianza del modelo de postura.
+        """
+        detections, poses = [], []
+        for p in self._personas(self._predict(frame, min(self.conf, person_conf))):
+            x1, y1, x2, y2 = p["bbox"]
+            if p["conf"] >= self.conf:
+                poses.append({"postures": p["postures"], "bbox": p["bbox"]})
+            if p["conf"] >= person_conf:
+                detections.append({"bbox": (x1, y1, x2, y2), "conf": p["conf"], "center": ((x1 + x2) // 2, (y1 + y2) // 2)})
+        return detections, poses
