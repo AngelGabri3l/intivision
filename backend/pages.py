@@ -55,13 +55,26 @@ def pending_link(user, active=None) -> str:
     return f'<a class="volver" id="nav-pendientes" href="/admin/pendientes"{actual}>Pendientes{f" ({n})" if n else ""}</a>'
 
 
+def equipos_link(user, active=None) -> str:
+    """El enlace «Equipos» del menú, solo para administradores."""
+    if user.get("role") != "community_admin":
+        return ""
+    actual = ' aria-current="page"' if active == "equipos" else ""
+    return f'<a class="volver" id="nav-equipos" href="/admin/equipos"{actual}>Equipos</a>'
+
+
+def admin_links(user, active=None) -> str:
+    """Los enlaces que solo ve un administrador: Pendientes (con su número) y Equipos."""
+    return pending_link(user, active) + equipos_link(user, active)
+
+
 def nav(user, active) -> str:
     def link(href, text, key):
         actual = ' aria-current="page"' if key == active else ""
         return f'<a class="volver" href="{href}"{actual}>{text}</a>'
     return (f'<span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
             + link("/", "Analizar", "analizar") + link("/cameras", "Cámaras", "camaras")
-            + link("/alerts", "Alertas", "alertas") + pending_link(user, active)
+            + link("/alerts", "Alertas", "alertas") + admin_links(user, active)
             + '<form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>')
 
 
@@ -259,6 +272,12 @@ def render_pending(user, nonce) -> str:
     """La pantalla «Pendientes de revisión» (H9). Las alertas las pide el navegador a /admin/review/pending."""
     return fill(read_template("pendientes.html"), nav=nav(user, "pendientes"), nonce=esc(nonce),
                 script=read_template("pendientes.js"))
+
+
+def render_equipos(user, nonce) -> str:
+    """La pantalla «Equipos y cámaras» (H5). Los datos los pide el navegador a /admin/equipos/datos."""
+    return fill(read_template("equipos.html"), nav=nav(user, "equipos"), nonce=esc(nonce),
+                script=read_template("equipos.js"))
 
 
 def _linked_panel(channel) -> str:

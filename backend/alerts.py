@@ -625,6 +625,28 @@ def _send_text(chat_id, text):
     _client.send_message(chat_id, text)
 
 
+def notify_user(user_id, text) -> bool:
+    """
+    Le manda un mensaje de texto por Telegram a una persona, si lo tiene vinculado y activo. Nunca lanza errores:
+    un aviso que no sale no debe romper lo que lo provocó. Devuelve si se envió.
+    """
+    if not available() or not user_id:
+        return False
+    try:
+        with db.cursor() as cur:
+            cur.execute("""SELECT chat_id FROM notification_channels
+                           WHERE user_id = %s AND kind = 'telegram' AND is_active AND verified_at IS NOT NULL
+                             AND chat_id IS NOT NULL LIMIT 1""", (str(user_id),))
+            fila = cur.fetchone()
+        if fila is None:
+            return False
+        _send_text(fila["chat_id"], text)
+        return True
+    except Exception as ex:
+        log.warning("No se pudo avisar por Telegram: %s", telegram_api.clean(ex, _cfg["token"]))
+        return False
+
+
 def camera_watch_forever(stop):
     """Revisa cada minuto si alguna cámara perdió señal (H4) y avisa por Telegram."""
     camera_watch.run_forever(stop, _send_text)

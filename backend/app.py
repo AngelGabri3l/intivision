@@ -458,7 +458,7 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes"))
+    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
@@ -951,6 +951,11 @@ async def _assign(request: Request, source_id: str, user: dict, reassign: bool):
                                             auth._clean_ip(auth.client_ip(request)))
     except sources.AssignError as ex:
         return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    aviso = resultado.pop("_aviso", None)
+    if aviso and aviso["owner_id"] and aviso["owner_id"] != str(user["id"]):
+        lugar = f" ({aviso['place']})" if aviso["place"] else ""
+        texto = f"VIGÍA: el administrador te asignó la cámara «{aviso['name']}»{lugar}. Ya aparece en tu lista de Cámaras."
+        threading.Thread(target=alerts.notify_user, args=(aviso["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     return JSONResponse(status_code=201, content=resultado)
 
 
@@ -964,6 +969,29 @@ async def admin_assign_source(source_id: str, request: Request, user: dict = Dep
 async def admin_reassign_source(source_id: str, request: Request, user: dict = Depends(auth.require_admin)):
     """Cambia la asignación: archiva la cámara anterior (sin borrar sus eventos) y crea la nueva."""
     return await _assign(request, source_id, user, reassign=True)
+
+
+@app.post("/admin/sources/{source_id}/unassign")
+async def admin_unassign_source(source_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """Quita la asignación: archiva la cámara sin borrar sus eventos. Una fuente sin asignar responde 409."""
+    try:
+        resultado = await asyncio.to_thread(sources.unassign_source, user, source_id, auth._clean_ip(auth.client_ip(request)))
+    except sources.AssignError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
+    return JSONResponse(content=resultado)
+
+
+@app.get("/admin/equipos/datos")
+async def admin_equipos_datos(user: dict = Depends(auth.require_admin)):
+    """Los equipos con sus cámaras y las personas a quienes se pueden asignar (lo usa la pantalla «Equipos y cámaras»)."""
+    return JSONResponse(content=await asyncio.to_thread(sources.list_equipos, user))
+
+
+@app.get("/admin/equipos", response_class=HTMLResponse)
+def equipos_page(request: Request, user: dict = Depends(auth.require_admin)):
+    """La pantalla «Equipos y cámaras» (H5): solo para administradores."""
+    nonce = request.state.csp_nonce
+    return HTMLResponse(pwa.inject(pages.render_equipos(user, nonce), nonce))
 
 
 @app.get("/events")
@@ -1153,5 +1181,5 @@ def home(request: Request, user: dict = Depends(auth.current_user)):
         opciones = f'<option value="">Se creará «Cámara de {pages.esc(user["full_name"])}» automáticamente</option>'
     return HTMLResponse(
         fill(template, usuario=f'{html.escape(user["full_name"])} · {rol}', cards=cards,
-             nonce=request.state.csp_nonce, camara_opciones=opciones, pendientes=pages.pending_link(user)),
+             nonce=request.state.csp_nonce, camara_opciones=opciones, pendientes=pages.admin_links(user)),
         headers={"Cache-Control": "no-store"})

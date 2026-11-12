@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 import logging
+import os
 import re
 
 import psycopg2.errors
@@ -25,6 +26,7 @@ KINDS = ("usb", "rtsp", "onvif")
 STATES = ("available", "disconnected", "error")
 _FORMAT_RE = re.compile(r"^[A-Za-z0-9_ .-]{1,16}$")
 DESTINOS = ("private", "common")
+ONLINE_SECONDS = int(os.environ.get("EDGE_ONLINE_SECONDS", "120"))    # una mini PC sin latido por más de esto se muestra «sin señal»
 
 
 class AssignError(Exception):
@@ -216,6 +218,58 @@ def list_sources(admin):
     return filas
 
 
+def _estado_equipo(status, last_seen, segundos):
+    if status == "revoked":
+        return "revoked"
+    if last_seen is None:
+        return "pending"
+    return "online" if segundos is not None and segundos <= ONLINE_SECONDS else "offline"
+
+
+def list_equipos(admin):
+    """
+    Lo que muestra el panel «Equipos y cámaras» (H5): cada mini PC de la comunidad con su estado, versión y última señal,
+    sus cámaras con a quién está asignada cada una, y las personas a quienes se puede asignar.
+    """
+    comunidad = admin["community_id"]
+    with db.cursor() as cur:
+        cur.execute("""SELECT d.id::text AS id, d.name, d.status, d.version, d.last_seen_at,
+                              CASE WHEN d.last_seen_at IS NULL THEN NULL
+                                   ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - d.last_seen_at)))::bigint END AS seconds_since
+                       FROM edge_devices d WHERE d.community_id = %s ORDER BY lower(d.name), d.name""", (comunidad,))
+        equipos = [dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT s.id::text AS id, s.edge_device_id::text AS edge_id, s.kind, s.label, s.state, s.caps, s.address,
+                              s.last_seen_at, c.id::text AS camera_id, c.name AS camera_name, c.kind AS camera_kind,
+                              c.place AS camera_place, u.id::text AS owner_id, u.full_name AS owner_name
+                       FROM camera_sources s
+                       LEFT JOIN cameras c ON c.source_id = s.id AND c.is_active
+                       LEFT JOIN users u ON u.id = c.user_id
+                       WHERE s.community_id = %s ORDER BY lower(s.label), s.device_key""", (comunidad,))
+        fuentes = [dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT id::text AS id, full_name, role FROM users
+                       WHERE community_id = %s AND status = 'active'
+                       ORDER BY (role = 'community_admin'), lower(full_name) LIMIT 500""", (comunidad,))
+        personas = [dict(r) for r in cur.fetchall()]
+    por_equipo = {}
+    for f in fuentes:
+        caps = f["caps"] if isinstance(f["caps"], dict) else {}
+        ancho, alto = caps.get("max_width"), caps.get("max_height")
+        camara = None
+        if f["camera_id"]:
+            camara = {"id": f["camera_id"], "name": f["camera_name"], "kind": f["camera_kind"], "place": f["camera_place"],
+                      "owner_id": f["owner_id"], "owner_name": f["owner_name"]}
+        por_equipo.setdefault(f["edge_id"], []).append({
+            "id": f["id"], "label": f["label"], "kind": f["kind"], "state": f["state"], "address": f["address"],
+            "resolution": f"{ancho}×{alto}" if ancho and alto else None, "last_seen_at": _iso(f["last_seen_at"]),
+            "camera": camara})
+    for e in equipos:
+        e["state"] = _estado_equipo(e["status"], e["last_seen_at"], e["seconds_since"])
+        e["last_seen_at"] = _iso(e["last_seen_at"])
+        e["sources"] = por_equipo.get(e["id"], [])
+    return {"equipos": equipos, "personas": personas, "online_seconds": ONLINE_SECONDS,
+            "limites": {"name_min": cameras.NAME_MIN, "name_max": cameras.NAME_MAX, "place_max": cameras.PLACE_MAX}}
+
+
 # ------------------------------------------------------------------ asignación
 
 def _validate_assignment(cur, admin, data):
@@ -298,4 +352,36 @@ def assign_source(admin, source_id, data, reassign=False, ip=None):
     except psycopg2.errors.UniqueViolation:
         # Respaldo: si dos administradores asignan a la vez, el índice único de source_id deja pasar a uno solo.
         raise AssignError(409, "Esa fuente ya está asignada. Usa reasignar para cambiarla.", "ya_asignada")
-    return {"camera_id": nueva["id"], "archived_camera_id": archivada}
+    return {"camera_id": nueva["id"], "archived_camera_id": archivada,
+            "_aviso": {"owner_id": datos["owner_id"], "name": datos["name"], "place": datos["place"]}}
+
+
+def unassign_source(admin, source_id, ip=None):
+    """
+    Quita la asignación de una fuente: archiva su cámara (deja de estar activa, libera la fuente y el nombre) sin borrar
+    ni un evento. La mini PC deja de analizarla en su siguiente latido. Queda en audit_log.
+    Una fuente de otra comunidad responde igual que una que no existe; una que no está asignada responde 409.
+    """
+    if not cameras.is_uuid(source_id):
+        raise AssignError(404, "Esa fuente no existe.", "no_existe")
+    with db.cursor() as cur:
+        cur.execute("""SELECT id::text AS id, edge_device_id::text AS edge_device_id, device_key
+                       FROM camera_sources WHERE id = %s AND community_id = %s FOR UPDATE""",
+                    (source_id, admin["community_id"]))
+        fuente = cur.fetchone()
+        if fuente is None:
+            raise AssignError(404, "Esa fuente no existe.", "no_existe")
+        cur.execute("SELECT id::text AS id, user_id::text AS user_id FROM cameras WHERE source_id = %s FOR UPDATE", (source_id,))
+        actual = cur.fetchone()
+        if actual is None:
+            raise AssignError(409, "Esa fuente no está asignada.", "sin_asignar")
+        cur.execute("""UPDATE cameras SET is_active = false, source_id = NULL,
+                              name = left(name, 35) || ' (archivada ' || to_char(now(), 'YYYY-MM-DD')
+                                     || ' ' || left(id::text, 8) || ')'
+                       WHERE id = %s""", (actual["id"],))
+        meta = {"camera_id": actual["id"], "device_key": fuente["device_key"], "edge_device_id": fuente["edge_device_id"]}
+        cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action,
+                                              entity, entity_id, ip, meta)
+                       VALUES ('user', %s, %s, %s, 'unassign_source', 'camera_source', %s, %s, %s::jsonb)""",
+                    (admin["id"], admin["community_id"], actual["user_id"], source_id, ip, json.dumps(meta)))
+    return {"archived_camera_id": actual["id"]}
