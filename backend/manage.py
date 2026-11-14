@@ -13,6 +13,8 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage create-camera \
       --community-slug cuadra-01 --name "Garaje" --kind private --owner correo@ejemplo.com
   docker compose exec backend python -m backend.manage list-cameras
+  docker compose exec backend python -m backend.manage demo-datos --community-slug cuadra-01 --eventos 300 --dias 30
+  docker compose exec backend python -m backend.manage demo-borrar --community-slug cuadra-01
   docker compose exec -it backend python -m backend.manage set-password --user correo@ejemplo.com
   docker compose exec backend python -m backend.manage set-status --user correo@ejemplo.com --status suspended
 
@@ -20,10 +22,14 @@ La contraseña se pide por teclado (no se ve y no queda en el historial). Para a
 pasar el nombre de una variable de entorno con --password-env.
 """
 import argparse
+import datetime
 import getpass
+import json
 import os
+import random
 import secrets
 import sys
+import uuid
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -204,6 +210,85 @@ def list_users(args):
         print("No hay usuarios.")
 
 
+# ---------------------------------------------------------------- datos de demostración (H8)
+# Los eventos de demostración llevan un edge_event_id con este comienzo fijo (la columna es un UUID, no admite texto libre), para
+# poder borrarlos sin tocar los reales. 20 caracteres fijos: no hay forma práctica de que un identificador real empiece así.
+DEMO_PREFIJO = "deadc0de-0000-4000-8000-"
+LIMA = datetime.timezone(datetime.timedelta(hours=-5))
+_SENALES = [("loitering", 5), ("proximity", 2), ("group", 2), ("hands_up", 1), ("fallen", 1), ("climbing", 1),
+            ("in_restricted_zone", 2), ("sensitive_hour", 3)]
+
+
+def _elegir(rnd, pares):
+    total = sum(p for _, p in pares)
+    x = rnd.uniform(0, total)
+    for valor, peso in pares:
+        x -= peso
+        if x <= 0:
+            return valor
+    return pares[-1][0]
+
+
+def demo_datos(args):
+    """
+    Siembra eventos FALSOS (con la hora, el nivel, el estado y las señales repartidos como en la vida real: más de noche y en fin de
+    semana) para ensayar el panel y sacar capturas sin esperar incidentes reales. Quedan marcados y se borran con demo-borrar.
+    """
+    if not 1 <= args.eventos <= 20000:
+        sys.exit("--eventos debe estar entre 1 y 20000.")
+    if not 1 <= args.dias <= 366:
+        sys.exit("--dias debe estar entre 1 y 366.")
+    rnd = random.Random(args.semilla)
+    ahora = datetime.datetime.now(datetime.timezone.utc)
+    with db.cursor() as cur:
+        cid = community_id(cur, args.community_slug)
+        # Solo en las cámaras que el administrador puede ver: en una que su dueño le oculta, el panel no mostraría nada.
+        cur.execute("""SELECT id::text AS id FROM cameras WHERE community_id = %s AND is_active
+                       AND (kind = 'common' OR admin_can_view) ORDER BY name""", (cid,))
+        camaras = [r["id"] for r in cur.fetchall()]
+        if not camaras:
+            sys.exit("Esa comunidad no tiene cámaras activas que el administrador pueda ver. Crea o asigna una primero (create-camera o el panel de Equipos).")
+        cur.execute("SELECT id::text AS id FROM users WHERE community_id = %s AND role = 'community_admin' AND status = 'active' ORDER BY created_at LIMIT 1", (cid,))
+        admin = cur.fetchone()
+        revisor = admin["id"] if admin else None
+        horas = [(h, 6 if (h >= 22 or h <= 5) else (2 if 18 <= h <= 21 else 1)) for h in range(24)]
+        for k in range(args.eventos):
+            while True:                                                       # viernes, sábado y domingo concentran más incidentes
+                dia = rnd.randint(0, args.dias - 1)
+                local = (ahora.astimezone(LIMA) - datetime.timedelta(days=dia)).replace(hour=0, minute=0, second=0, microsecond=0)
+                if rnd.random() < (1.0 if local.weekday() >= 4 else 0.55):
+                    break
+            hora = _elegir(rnd, horas)
+            ocurrio = (local + datetime.timedelta(hours=hora, minutes=rnd.randint(0, 59), seconds=rnd.randint(0, 59))).astimezone(datetime.timezone.utc)
+            ocurrio = min(ocurrio, ahora - datetime.timedelta(minutes=1))
+            alto = rnd.random() < 0.30
+            nivel, puntaje = ("ALTO", rnd.randint(6, 9)) if alto else ("MEDIO", rnd.randint(3, 5))
+            estado = _elegir(rnd, [("falsa alarma", 15), ("verificado", 25), ("sin verificar", 60)])
+            revisado = ocurrio + datetime.timedelta(seconds=rnd.randint(20, 400)) if estado != "sin verificar" else None
+            escalado = ocurrio + datetime.timedelta(seconds=180) if (estado == "sin verificar" and rnd.random() < 0.08) else None
+            cur.execute("""INSERT INTO events (community_id, camera_id, source, level, score, people_count, status, reviewed_at, reviewed_by,
+                                               escalated_at, occurred_at, edge_event_id)
+                           VALUES (%s,%s,'edge',%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                        (cid, rnd.choice(camaras), nivel, puntaje, _elegir(rnd, [(1, 5), (2, 3), (3, 2), (4, 1)]), estado, revisado,
+                         revisor if revisado else None, escalado, ocurrio, DEMO_PREFIJO + "%012x" % rnd.getrandbits(48)))
+            ev = cur.fetchone()["id"]
+            cur.execute("INSERT INTO event_signals (event_id, signal_code) VALUES (%s, 'person_present')", (ev,))
+            for codigo in {_elegir(rnd, _SENALES) for _ in range(rnd.randint(1, 2))}:
+                detalle = f"merodeo {rnd.randint(15, 60)}s" if codigo == "loitering" else (f"grupo de {rnd.randint(3, 5)}" if codigo == "group" else None)
+                cur.execute("INSERT INTO event_signals (event_id, signal_code, detail) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", (ev, codigo, detalle))
+    print(f"Listo: {args.eventos} eventos de DEMOSTRACIÓN en «{args.community_slug}» (últimos {args.dias} días, sobre {len(camaras)} cámara(s)).")
+    print("Se borran con:  python -m backend.manage demo-borrar --community-slug", args.community_slug)
+
+
+def demo_borrar(args):
+    """Borra SOLO los eventos de demostración de la comunidad (con sus señales); los reales no se tocan."""
+    with db.cursor() as cur:
+        cid = community_id(cur, args.community_slug)
+        cur.execute("DELETE FROM events WHERE community_id = %s AND edge_event_id::text LIKE %s", (cid, DEMO_PREFIJO + "%"))
+        n = cur.rowcount
+    print(f"Se borraron {n} eventos de demostración de «{args.community_slug}».")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Administración de VIGÍA")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -250,6 +335,17 @@ def main():
     p = sub.add_parser("list-cameras")
     p.add_argument("--community-slug")
     p.set_defaults(fn=list_cameras)
+
+    p = sub.add_parser("demo-datos", help="siembra eventos falsos de demostración para ensayar el panel")
+    p.add_argument("--community-slug", required=True)
+    p.add_argument("--eventos", type=int, default=300)
+    p.add_argument("--dias", type=int, default=30)
+    p.add_argument("--semilla", type=int, default=1, help="la misma semilla da los mismos datos")
+    p.set_defaults(fn=demo_datos)
+
+    p = sub.add_parser("demo-borrar", help="borra los eventos de demostración (los reales no se tocan)")
+    p.add_argument("--community-slug", required=True)
+    p.set_defaults(fn=demo_borrar)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")

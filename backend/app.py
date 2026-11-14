@@ -11,6 +11,7 @@ import logging
 import datetime
 import html
 import secrets
+from typing import Optional
 from urllib.parse import urlparse
 
 import cv2
@@ -19,13 +20,13 @@ import psycopg2
 import psycopg2.pool
 from fastapi import (FastAPI, UploadFile, File, Request, WebSocket,
                      WebSocketDisconnect, Depends, Form)
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response, StreamingResponse
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl  # noqa: E402
+from backend import hitl, dashboard  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1052,6 +1053,37 @@ def equipos_page(request: Request, user: dict = Depends(auth.require_admin)):
     """La pantalla «Equipos y cámaras» (H5): solo para administradores."""
     nonce = request.state.csp_nonce
     return HTMLResponse(pwa.inject(pages.render_equipos(user, nonce), nonce))
+
+
+# ---------------------- panel de incidentes (H8) ----------------------
+
+def _panel_error(e):
+    return JSONResponse(status_code=e.status, content={"error": e.message, "code": e.code})
+
+
+@app.get("/admin/panel/datos")
+async def admin_panel_datos(desde: Optional[str] = None, hasta: Optional[str] = None, camara: Optional[str] = None,
+                            falsas: bool = False, user: dict = Depends(auth.require_admin)):
+    """Las tarjetas, los gráficos, el ranking, las señales y los equipos del panel (ver backend/dashboard.py para las reglas)."""
+    try:
+        return JSONResponse(content=await asyncio.to_thread(dashboard.panel, user, desde, hasta, camara, falsas))
+    except dashboard.DashboardError as e:
+        return _panel_error(e)
+
+
+@app.get("/admin/panel/exportar.csv")
+async def admin_panel_exportar(request: Request, desde: Optional[str] = None, hasta: Optional[str] = None,
+                               camara: Optional[str] = None, user: dict = Depends(auth.require_admin)):
+    """Los eventos del rango en CSV para Excel. Queda en audit_log quién exportó, qué rango y cuántas filas."""
+    try:
+        f = await asyncio.to_thread(dashboard.leer_filtros, user, desde, hasta, camara)
+        dashboard.comprobar_espera(user)
+        filas = await asyncio.to_thread(dashboard.contar_exportacion, user, f)
+        await asyncio.to_thread(dashboard.auditar_exportacion, user, f, min(filas, dashboard.LIMITE_CSV), auth._clean_ip(auth.client_ip(request)))
+    except dashboard.DashboardError as e:
+        return _panel_error(e)
+    return StreamingResponse(dashboard.generar_csv(user, f), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{dashboard.nombre_archivo(f)}"'})
 
 
 @app.get("/events")
