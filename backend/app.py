@@ -471,7 +471,7 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    pagina = request.url.path == "/" or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos"))
+    pagina = request.url.path in ("/", "/admin") or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
@@ -1084,6 +1084,13 @@ async def admin_panel_exportar(request: Request, desde: Optional[str] = None, ha
         return _panel_error(e)
     return StreamingResponse(dashboard.generar_csv(user, f), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{dashboard.nombre_archivo(f)}"'})
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def panel_page(request: Request, user: dict = Depends(auth.require_admin)):
+    """El panel de incidentes (H8): solo para administradores. Los datos los pide el navegador a /admin/panel/datos."""
+    nonce = request.state.csp_nonce
+    return HTMLResponse(pwa.inject(pages.render_panel(user, nonce), nonce))
 
 
 @app.get("/events")

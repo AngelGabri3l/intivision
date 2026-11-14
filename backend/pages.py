@@ -63,9 +63,17 @@ def equipos_link(user, active=None) -> str:
     return f'<a class="volver" id="nav-equipos" href="/admin/equipos"{actual}>Equipos</a>'
 
 
+def panel_link(user, active=None) -> str:
+    """El enlace «Panel» del menú, solo para administradores."""
+    if user.get("role") != "community_admin":
+        return ""
+    actual = ' aria-current="page"' if active == "panel" else ""
+    return f'<a class="volver" id="nav-panel" href="/admin"{actual}>Panel</a>'
+
+
 def admin_links(user, active=None) -> str:
-    """Los enlaces que solo ve un administrador: Pendientes (con su número) y Equipos."""
-    return pending_link(user, active) + equipos_link(user, active)
+    """Los enlaces que solo ve un administrador: Panel, Pendientes (con su número) y Equipos."""
+    return panel_link(user, active) + pending_link(user, active) + equipos_link(user, active)
 
 
 def nav(user, active) -> str:
@@ -272,6 +280,11 @@ def render_pending(user, nonce) -> str:
     """La pantalla «Pendientes de revisión» (H9). Las alertas las pide el navegador a /admin/review/pending."""
     return fill(read_template("pendientes.html"), nav=nav(user, "pendientes"), nonce=esc(nonce),
                 script=read_template("pendientes.js"))
+
+
+def render_panel(user, nonce) -> str:
+    """El panel de incidentes (H8). Los datos los pide el navegador a /admin/panel/datos."""
+    return fill(read_template("panel.html"), nav=nav(user, "panel"), nonce=esc(nonce), script=read_template("panel.js"))
 
 
 def render_equipos(user, nonce) -> str:
