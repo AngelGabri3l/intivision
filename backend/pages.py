@@ -176,7 +176,7 @@ def camera_card(c, user) -> str:
 
 # ------------------------------------------------------------------ pantallas
 
-def camera_block(clave, etiqueta, titulo, cams, user, vacio, aviso="") -> str:
+def camera_block(clave, titulo, cams, user, vacio, aviso="") -> str:
     """
     Una sección de la lista de cámaras: su título, cuántas hay activas y sus tarjetas (o el mensaje de vacío). Las cámaras archivadas
     no cuentan ni se mezclan con las activas: van en un desplegable al final, para no perder el acceso a su historial.
@@ -190,7 +190,7 @@ def camera_block(clave, etiqueta, titulo, cams, user, vacio, aviso="") -> str:
                        f'<div class="camaras" role="list">{"".join(camera_card(c, user) for c in archivadas)}</div></details>')
     return (f'<section class="seccion" aria-labelledby="titulo-{clave}"><div class="contenedor">{aviso}'
             f'<div class="historial__cabecera"><h2 class="historial__titulo" id="titulo-{clave}">'
-            f'<span class="etiqueta">{etiqueta}</span><span class="pixel">{titulo}</span></h2>'
+            f'<span class="pixel">{titulo}</span></h2>'
             f'<span class="historial__total">{esc(count_text(len(activas), "cámara", "cámaras"))}</span></div>'
             f'{grilla}{desplegable}</div></section>')
 
@@ -209,13 +209,13 @@ def render_cameras(user, cams, message=None) -> str:
     if admin:
         mias = [c for c in cams if c["user_id"] == user["id"]]
         otras = [c for c in cams if c["user_id"] != user["id"]]
-        bloques = (camera_block("mias", "//04 MIS_CAMARAS", "Mis cámaras", mias, user,
+        bloques = (camera_block("mias", "Mis cámaras", mias, user,
                                 _vacio("Ninguna cámara está a tu nombre", "Las cámaras de la comunidad están más abajo."), aviso)
-                   + camera_block("comunidad", "//05 COMUNIDAD", "Cámaras de la comunidad", otras, user,
+                   + camera_block("comunidad", "Cámaras de la comunidad", otras, user,
                                   _vacio("Todavía no hay otras cámaras en la comunidad",
                                          'Asígnalas desde <a href="/admin/equipos">Equipos y cámaras</a>.')))
     else:
-        bloques = camera_block("mias", "//04 MIS_CAMARAS", "Mis cámaras", cams, user,
+        bloques = camera_block("mias", "Mis cámaras", cams, user,
                                _vacio("Aún no tienes cámaras", "Tu administrador te asignará una desde el panel de equipos y cámaras."), aviso)
     return fill(
         read_template("camaras.html"),

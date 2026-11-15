@@ -136,8 +136,6 @@ button, input { font: inherit; color: inherit; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
-.etiqueta { display: inline-flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-.etiqueta::before { content: ""; width: 8px; height: 8px; background: hsl(var(--accent)); }
 
 .analisis { display: grid; gap: 32px; }
 .analisis__texto { display: grid; gap: 16px; align-content: start; }
@@ -342,7 +340,6 @@ a.btn { text-decoration: none; }
   <section class="seccion trama" aria-labelledby="titulo-mapa">
     <div class="contenedor analisis">
       <div class="analisis__texto">
-        <p class="etiqueta">//17 MAPA</p>
         <h1 class="analisis__titulo pixel" id="titulo-mapa">Mapa de calor por cámara</h1>
         <p class="analisis__descripcion">Dónde ocurren los incidentes. Se dibujan las cámaras de zonas comunes y las privadas cuyo dueño aceptó mostrarlas, con la ubicación exacta que él eligió. Cuanto más grande el círculo, más incidentes.</p>
       </div>
@@ -353,7 +350,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-mapa-filtros">
-          <span class="etiqueta">//18 RANGO</span>
           <span class="pixel">Qué se muestra</span>
         </h2>
         <span class="historial__total" id="mapa-resumen"></span>
@@ -387,7 +383,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-mapa-vista">
-          <span class="etiqueta">//19 MAPA</span>
           <span class="pixel">Cámaras en el mapa</span>
         </h2>
       </div>

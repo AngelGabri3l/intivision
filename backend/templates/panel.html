@@ -135,8 +135,6 @@ button, input { font: inherit; color: inherit; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
-.etiqueta { display: inline-flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-.etiqueta::before { content: ""; width: 8px; height: 8px; background: hsl(var(--accent)); }
 
 .analisis { display: grid; gap: 32px; }
 .analisis__texto { display: grid; gap: 16px; align-content: start; }
@@ -377,7 +375,6 @@ a.btn { text-decoration: none; }
   <section class="seccion trama" aria-labelledby="titulo-panel">
     <div class="contenedor analisis">
       <div class="analisis__texto">
-        <p class="etiqueta">//09 PANEL</p>
         <h1 class="analisis__titulo pixel" id="titulo-panel">Panel de incidentes</h1>
         <p class="analisis__descripcion">Los incidentes de las cámaras que puedes ver, por día, por hora y por cámara. Un incidente es un evento que no se descartó. Las cámaras que su dueño oculta no cuentan en ninguna cifra. Las horas son las de Lima.</p>
       </div>
@@ -388,7 +385,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-filtros">
-          <span class="etiqueta">//10 FILTROS</span>
           <span class="pixel">Rango y cámara</span>
         </h2>
         <span class="historial__total" id="panel-rango"></span>
@@ -423,7 +419,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-resumen">
-          <span class="etiqueta">//11 RESUMEN</span>
           <span class="pixel">Incidentes ahora</span>
         </h2>
       </div>
@@ -436,7 +431,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-diario">
-          <span class="etiqueta">//12 POR_DÍA</span>
           <span class="pixel">Incidentes por día</span>
         </h2>
       </div>
@@ -449,7 +443,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-calor">
-          <span class="etiqueta">//13 HORA_Y_DÍA</span>
           <span class="pixel">Cuándo ocurren</span>
         </h2>
       </div>
@@ -464,7 +457,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-ranking">
-          <span class="etiqueta">//14 CÁMARAS</span>
           <span class="pixel">Cámaras con más incidentes</span>
         </h2>
         <a class="volver" href="/admin/mapa">Ver en el mapa</a>
@@ -477,7 +469,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-senales">
-          <span class="etiqueta">//15 SEÑALES</span>
           <span class="pixel">Señales más frecuentes</span>
         </h2>
       </div>
@@ -491,7 +482,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-equipos">
-          <span class="etiqueta">//16 EQUIPOS</span>
           <span class="pixel">Estado de los equipos</span>
         </h2>
         <a class="volver" href="/admin/equipos">Administrar equipos y cámaras</a>

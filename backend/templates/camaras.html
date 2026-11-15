@@ -135,8 +135,6 @@ button, input { font: inherit; color: inherit; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
-.etiqueta { display: inline-flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-.etiqueta::before { content: ""; width: 8px; height: 8px; background: hsl(var(--accent)); }
 
 .analisis { display: grid; gap: 32px; }
 .analisis__texto { display: grid; gap: 16px; align-content: start; }
@@ -280,7 +278,6 @@ a.btn { text-decoration: none; }
   <section class="seccion trama" aria-labelledby="titulo-camaras">
     <div class="contenedor">
       <div class="analisis__texto">
-        <p class="etiqueta">//03 CAMARAS</p>
         <h1 class="analisis__titulo pixel" id="titulo-camaras">{titulo}</h1>
         <p class="analisis__descripcion">{descripcion}</p>
       </div>

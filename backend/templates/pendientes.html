@@ -135,8 +135,6 @@ button, input { font: inherit; color: inherit; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
-.etiqueta { display: inline-flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-.etiqueta::before { content: ""; width: 8px; height: 8px; background: hsl(var(--accent)); }
 
 .analisis { display: grid; gap: 32px; }
 .analisis__texto { display: grid; gap: 16px; align-content: start; }
@@ -321,7 +319,6 @@ a.btn { text-decoration: none; }
   <section class="seccion trama" aria-labelledby="titulo-pendientes">
     <div class="contenedor analisis">
       <div class="analisis__texto">
-        <p class="etiqueta">//07 PENDIENTES</p>
         <h1 class="analisis__titulo pixel" id="titulo-pendientes">Pendientes de revisión</h1>
         <p class="analisis__descripcion">Alertas de las zonas comunes que esperan que un administrador las confirme o las descarte. Si nadie responde a tiempo, se avisa a todos como «no verificada».</p>
       </div>
@@ -332,7 +329,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-en-espera">
-          <span class="etiqueta">//08 EN_ESPERA</span>
           <span class="pixel">En espera</span>
         </h2>
         <span class="historial__total" id="pend-total"></span>

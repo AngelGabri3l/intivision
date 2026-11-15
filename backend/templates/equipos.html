@@ -135,8 +135,6 @@ button, input { font: inherit; color: inherit; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
 .seccion + .seccion { border-top: 1px solid hsl(var(--border)); }
-.etiqueta { display: inline-flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-.etiqueta::before { content: ""; width: 8px; height: 8px; background: hsl(var(--accent)); }
 
 .analisis { display: grid; gap: 32px; }
 .analisis__texto { display: grid; gap: 16px; align-content: start; }
@@ -364,7 +362,6 @@ a.btn { text-decoration: none; }
   <section class="seccion trama" aria-labelledby="titulo-equipos">
     <div class="contenedor analisis">
       <div class="analisis__texto">
-        <p class="etiqueta">//09 EQUIPOS</p>
         <h1 class="analisis__titulo pixel" id="titulo-equipos">Equipos y cámaras</h1>
         <p class="analisis__descripcion">Cada mini PC muestra las cámaras que detecta. Tú decides a quién se asigna cada una: a una persona de la comunidad o a la zona común. Una cámara sin asignar no se analiza.</p>
       </div>
@@ -375,7 +372,6 @@ a.btn { text-decoration: none; }
     <div class="contenedor">
       <div class="historial__cabecera">
         <h2 class="historial__titulo" id="titulo-lista-equipos">
-          <span class="etiqueta">//10 MINI_PC</span>
           <span class="pixel">Mini PC y cámaras</span>
         </h2>
       </div>
