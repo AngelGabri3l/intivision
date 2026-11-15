@@ -169,24 +169,55 @@ def camera_card(c, user) -> str:
 
 # ------------------------------------------------------------------ pantallas
 
+def camera_block(clave, etiqueta, titulo, cams, user, vacio, aviso="") -> str:
+    """
+    Una sección de la lista de cámaras: su título, cuántas hay activas y sus tarjetas (o el mensaje de vacío). Las cámaras archivadas
+    no cuentan ni se mezclan con las activas: van en un desplegable al final, para no perder el acceso a su historial.
+    """
+    activas = [c for c in cams if c["is_active"]]
+    archivadas = [c for c in cams if not c["is_active"]]
+    grilla = f'<div class="camaras" role="list">{"".join(camera_card(c, user) for c in activas) if activas else vacio}</div>'
+    desplegable = ""
+    if archivadas:
+        desplegable = (f'<details class="archivadas"><summary>Archivadas ({len(archivadas)})</summary>'
+                       f'<div class="camaras" role="list">{"".join(camera_card(c, user) for c in archivadas)}</div></details>')
+    return (f'<section class="seccion" aria-labelledby="titulo-{clave}"><div class="contenedor">{aviso}'
+            f'<div class="historial__cabecera"><h2 class="historial__titulo" id="titulo-{clave}">'
+            f'<span class="etiqueta">{etiqueta}</span><span class="pixel">{titulo}</span></h2>'
+            f'<span class="historial__total">{esc(count_text(len(activas), "cámara", "cámaras"))}</span></div>'
+            f'{grilla}{desplegable}</div></section>')
+
+
+def _vacio(titulo, texto) -> str:
+    return f'<div class="vacio"><p class="vacio__titulo">{titulo}</p><p class="vacio__texto">{texto}</p></div>'
+
+
 def render_cameras(user, cams, message=None) -> str:
+    """
+    El vecino ve solo «Mis cámaras». El administrador ve primero las registradas a su cuenta y, más abajo, todas las demás de la
+    comunidad que puede ver; cada cámara sale en un solo bloque.
+    """
     admin = user["role"] == "community_admin"
-    if cams:
-        tarjetas = "".join(camera_card(c, user) for c in cams)
+    aviso = alert_block(message)
+    if admin:
+        mias = [c for c in cams if c["user_id"] == user["id"]]
+        otras = [c for c in cams if c["user_id"] != user["id"]]
+        bloques = (camera_block("mias", "//04 MIS_CAMARAS", "Mis cámaras", mias, user,
+                                _vacio("Ninguna cámara está a tu nombre", "Las cámaras de la comunidad están más abajo."), aviso)
+                   + camera_block("comunidad", "//05 COMUNIDAD", "Cámaras de la comunidad", otras, user,
+                                  _vacio("Todavía no hay otras cámaras en la comunidad",
+                                         'Asígnalas desde <a href="/admin/equipos">Equipos y cámaras</a>.')))
     else:
-        tarjetas = ('<div class="vacio"><p class="vacio__titulo">Aún no tienes cámaras</p>'
-                    '<p class="vacio__texto">Tu administrador te asignará una desde el panel de equipos y cámaras.</p></div>')
-    tarjetas = alert_block(message) + tarjetas              # el aviso de «esa cámara no existe» va encima de la lista
+        bloques = camera_block("mias", "//04 MIS_CAMARAS", "Mis cámaras", cams, user,
+                               _vacio("Aún no tienes cámaras", "Tu administrador te asignará una desde el panel de equipos y cámaras."), aviso)
     return fill(
         read_template("camaras.html"),
         nav=nav(user, "camaras"),
-        titulo="Cámaras de la comunidad" if admin else "Mis cámaras",
-        descripcion=("Ves las cámaras de toda tu comunidad. Las de los vecinos aparecen mientras su dueño "
-                     "no te las oculte." if admin else
+        titulo="Cámaras" if admin else "Mis cámaras",
+        descripcion=("Primero las que están a tu nombre y, más abajo, las de la comunidad que puedes ver. Las de los vecinos "
+                     "aparecen mientras su dueño no te las oculte." if admin else
                      "Las cámaras que tu administrador te asignó, cada una con su historial de eventos."),
-        titulo_lista="Todas las cámaras" if admin else "Tus cámaras",
-        total=esc(count_text(len(cams), "cámara", "cámaras")) if cams else "",
-        tarjetas=tarjetas)
+        bloques=bloques)
 
 
 def filter_link(cam_id, nivel, desde, hasta, limite) -> str:

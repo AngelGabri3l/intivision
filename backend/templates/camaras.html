@@ -225,6 +225,9 @@ a.btn { text-decoration: none; }
 .evento__camara { color: hsl(var(--muted-foreground)); font-size: 12px; overflow-wrap: anywhere; }
 /* --- Pantallas de cámaras --- */
 .camaras { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.archivadas { margin-top: 16px; }
+.archivadas > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; font-size: 14px; color: hsl(var(--muted-foreground)); }
+.archivadas > .camaras { margin-top: 12px; }
 .cam { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--card)); color: hsl(var(--card-foreground)); border-radius: var(--radius); }
 .cam__fila { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cam__nombre { margin: 0; font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
@@ -277,18 +280,7 @@ a.btn { text-decoration: none; }
     </div>
   </section>
 
-  <section class="seccion" aria-labelledby="titulo-lista">
-    <div class="contenedor">
-      <div class="historial__cabecera">
-        <h2 class="historial__titulo" id="titulo-lista">
-          <span class="etiqueta">//04 LISTADO</span>
-          <span class="pixel">{titulo_lista}</span>
-        </h2>
-        <span class="historial__total">{total}</span>
-      </div>
-      <div class="camaras" role="list">{tarjetas}</div>
-    </div>
-  </section>
+  {bloques}
 </main>
 
 <footer class="pie">
