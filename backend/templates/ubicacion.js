@@ -17,6 +17,7 @@
   var punto = null;             // lo que se eligió en el editor y aún no se guardó: { lat, lng, precision }
   var mapaL = null, pin = null, teselas = null;
   var ocupado = false, quitando = false, avisoTeselas = false;
+  var botonesResumen = null;    // los botones del resumen se esconden mientras el editor está abierto: nunca hay más de 5 a la vista
 
   function nodo(tag, clase, texto) {
     var e = document.createElement(tag);
@@ -37,7 +38,7 @@
   }
 
   var cuerpo = document.getElementById("ubic-cuerpo");
-  var resumen = nodo("div"), editor = nodo("div", "ubic__editor");
+  var resumen = nodo("div", "ubic__resumen"), editor = nodo("div", "ubic__editor");
   editor.hidden = true;
   cuerpo.appendChild(resumen); cuerpo.appendChild(editor);
   var mensaje = nodo("p", "ubic__mensaje");
@@ -67,14 +68,15 @@
 
   function dibujarResumen() {
     vaciar(resumen);
+    var estado = nodo("div", "ubic__estado");
     if (actual.lat === null) {
-      resumen.appendChild(nodo("p", "", "Esta cámara no tiene ubicación asignada."));
+      estado.appendChild(nodo("p", "", "Esta cámara no tiene ubicación asignada."));
     } else {
-      resumen.appendChild(nodo("p", "", "Ubicación guardada: " + fmt(actual.lat) + ", " + fmt(actual.lng) +
+      estado.appendChild(nodo("p", "", "Ubicación guardada: " + fmt(actual.lat) + ", " + fmt(actual.lng) +
         (actual.precision !== null ? " (precisión de unos " + actual.precision + " m)" : "") + (actual.fijada ? ". Fijada el " + fechaLarga(actual.fijada) + "." : ".")));
-      resumen.appendChild(permisoVisible());
+      estado.appendChild(permisoVisible());
       if (actual.visible && !actual.adminVe) {
-        resumen.appendChild(nodo("p", "ubic__suave", "Ahora mismo no aparecerá en el mapa porque tienes esta cámara oculta al administrador."));
+        estado.appendChild(nodo("p", "ubic__suave", "Ahora mismo no aparecerá en el mapa porque tienes esta cámara oculta al administrador."));
       }
     }
     var botones = nodo("div", "ubic__botones");
@@ -94,7 +96,10 @@
       });
       botones.appendChild(q);
     }
+    resumen.appendChild(estado);
     resumen.appendChild(botones);
+    botonesResumen = botones;
+    botones.hidden = !editor.hidden;
   }
 
   // ------------------------------------------------------------------ el editor: elegir el punto
@@ -145,6 +150,14 @@
       if (!avisoTeselas) { avisoTeselas = true; avisoEditor.textContent = "El mapa de fondo no está disponible ahora. Puedes usar el GPS o pegar las coordenadas."; }
     });
     mapaL.on("click", function (ev) { ponerPunto(ev.latlng.lat, ev.latlng.lng, null, false); });
+    window.addEventListener("resize", function () { if (mapaL && !editor.hidden) { mapaL.invalidateSize(); } });   // el mapa recalcula su tamaño si cambia la ventana
+  }
+
+  function grupo(titulo, hijos) {
+    var g = nodo("div", "ubic__grupo");
+    g.appendChild(nodo("h3", "ubic__grupo-titulo", titulo));
+    hijos.forEach(function (h) { g.appendChild(h); });
+    return g;
   }
 
   function construirEditor() {
@@ -167,14 +180,17 @@
     var et = nodo("label", "ubic__suave", "O pega las coordenadas o un enlace de Google Maps (en Google Maps, mantén presionado el punto y copia los números)");
     campoPegar = nodo("input"); campoPegar.type = "text"; campoPegar.id = "ubic-pegar"; campoPegar.autocomplete = "off"; campoPegar.spellcheck = false;
     campoPegar.placeholder = "−12.046374, −77.042793"; et.setAttribute("for", "ubic-pegar");
-    var usar = nodo("button", "btn btn--texto", "Usar estas coordenadas"); usar.type = "button"; usar.id = "ubic-usar";
+    var usar = nodo("button", "btn btn--texto", "Usar"); usar.type = "button"; usar.id = "ubic-usar";
+    usar.setAttribute("aria-label", "Usar estas coordenadas");
     usar.addEventListener("click", function () {
       var r = window.VigiaCoordenadas.parsear(campoPegar.value);
       if (r.error) { avisoEditor.textContent = r.error; return; }
       avisoEditor.textContent = "";
       ponerPunto(r.lat, r.lng, null, true);
     });
-    pegar.appendChild(et); pegar.appendChild(campoPegar); pegar.appendChild(usar);
+    var filaPegar = nodo("div", "ubic__pegar");
+    filaPegar.appendChild(campoPegar); filaPegar.appendChild(usar);
+    pegar.appendChild(et); pegar.appendChild(filaPegar);
     etPunto = nodo("p", "ubic__mensaje");
     etPunto.id = "ubic-punto";
     avisoEditor = nodo("p", "ubic__suave"); avisoEditor.id = "ubic-aviso"; avisoEditor.setAttribute("role", "status"); avisoEditor.setAttribute("aria-live", "polite");
@@ -195,12 +211,19 @@
     var cancelar = nodo("button", "btn btn--texto", "Cancelar"); cancelar.type = "button"; cancelar.id = "ubic-cancelar";
     cancelar.addEventListener("click", cerrarEditor);
     fila2.appendChild(btnGuardar); fila2.appendChild(cancelar);
-    [fila1, divMapa, pegar, etPunto, avisoEditor, consentimiento, cajaLejos, fila2].forEach(function (e) { editor.appendChild(e); });
+    var colMapa = nodo("div", "ubic__colmapa"), colControl = nodo("div", "ubic__colcontrol");
+    colMapa.appendChild(divMapa);
+    colControl.appendChild(grupo("Elegir el punto", [fila1, pegar, etPunto, avisoEditor]));
+    colControl.appendChild(grupo("Permiso", [consentimiento]));
+    colControl.appendChild(cajaLejos);
+    colControl.appendChild(grupo("Acciones", [fila2]));
+    editor.appendChild(colMapa); editor.appendChild(colControl);
   }
 
   function abrirEditor() {
     if (!divMapa) { construirEditor(); }
     editor.hidden = false;
+    if (botonesResumen) { botonesResumen.hidden = true; }
     avisar("");
     punto = null;
     chkPermiso.checked = actual.visible;
@@ -213,7 +236,7 @@
     else if (pin) { mapaL.removeLayer(pin); pin = null; }                        // se quitó la ubicación desde la última vez
   }
 
-  function cerrarEditor() { editor.hidden = true; punto = null; cajaLejos.hidden = true; }
+  function cerrarEditor() { editor.hidden = true; punto = null; cajaLejos.hidden = true; if (botonesResumen) { botonesResumen.hidden = false; } }
 
   function guardar(confirmar) {
     if (!punto || ocupado) { return; }

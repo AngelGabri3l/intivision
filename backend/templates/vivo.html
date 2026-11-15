@@ -5,8 +5,9 @@
       <span class="pixel">En vivo</span>
     </h2>
     <style>
-      .vivo__marco { max-width: 720px; margin: 12px 0; border: 1px solid rgba(128, 128, 128, .45); border-radius: 12px; overflow: hidden; background: #0b1220; }
+      .vivo__marco { max-width: 720px; margin: 12px auto; border: 1px solid rgba(128, 128, 128, .45); border-radius: 12px; overflow: hidden; background: #0b1220; }
       .vivo__img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: #0b1220; }
+      .vivo__acciones { display: flex; justify-content: center; margin: 0; }
       .vivo__estado { margin: 0; padding: 10px 14px; font-size: 15px; color: #cfd8e6; background: #0b1220; }
     </style>
     <div class="vivo__marco">
@@ -14,7 +15,7 @@
            src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
       <p class="vivo__estado" id="vivo-estado" role="status" aria-live="polite">Conectando…</p>
     </div>
-    <p><button type="button" class="btn" id="vivo-boton">Detener</button></p>
+    <p class="vivo__acciones"><button type="button" class="btn" id="vivo-boton">Detener</button></p>
   </div>
 </section>
 <script nonce="{nonce}">{script}</script>
