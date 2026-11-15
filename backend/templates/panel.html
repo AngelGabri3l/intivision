@@ -329,6 +329,20 @@ a.btn { text-decoration: none; }
 .sv-bajo { fill: hsl(var(--muted-foreground)); }
 .sv-inc { fill: hsl(var(--accent)); }
 .sv-fal { fill: hsl(var(--muted-foreground)); fill-opacity: .55; }
+.sv-banda-actual { fill: hsl(var(--muted-foreground)); fill-opacity: .55; }
+.sv-banda-sugerida { fill: hsl(var(--foreground)); }
+.leyenda__muestra--banda-actual { background: hsl(var(--muted-foreground)); opacity: .55; }
+.leyenda__muestra--banda-sugerida { background: hsl(var(--foreground)); }
+.panel__horario { display: grid; gap: 10px; margin: 18px 0 0; padding: 14px 16px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--card)); }
+.panel__horario[hidden] { display: none; }
+.panel__horario-titulo { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.panel__horario p { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.panel__horario-estado { font-weight: 700; }
+.panel__horario-estado--error { color: hsl(var(--destructive)); }
+.panel__confirmar { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--muted)); }
+.panel__confirmar[hidden] { display: none; }
+.panel__botones { display: flex; flex-wrap: wrap; gap: 8px; }
+.panel__botones .btn { min-height: 44px; }
 .sv-calor-0 { fill: none; stroke: hsl(var(--border)); stroke-width: .5; }
 .sv-calor-1 { fill: hsl(var(--accent)); fill-opacity: .2; }
 .sv-calor-2 { fill: hsl(var(--accent)); fill-opacity: .4; }
@@ -437,6 +451,7 @@ a.btn { text-decoration: none; }
       <div class="panel__lienzo" id="panel-calor"></div>
       <ul class="panel__leyenda" id="panel-calor-leyenda"></ul>
       <p class="panel__nota" id="panel-calor-nota"></p>
+      <div class="panel__horario" id="panel-horario"></div>
     </div>
   </section>
 

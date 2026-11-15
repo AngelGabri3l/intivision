@@ -32,6 +32,9 @@ MIN_PREVIO = 5                  # si el periodo anterior tuvo menos incidentes, 
 POCOS_DATOS = 20                # por debajo de esto el mapa de calor avisa que son pocos datos
 TOP_RANKING = 10
 TOP_SENALES = 8
+VENTANA_HORAS = 6               # largo del horario sensible que se sugiere
+MIN_PARA_SUGERIR = 20           # con menos incidentes en los últimos 30 días no se sugiere nada
+HORARIO_DEFECTO = (22, 6)       # el del motor (config.yaml) cuando la comunidad no definió uno
 LIMITE_CSV = 50_000
 ESPERA_CSV_S = 5                # entre una exportación y la siguiente del mismo administrador
 LOTE_CSV = 500
@@ -303,6 +306,104 @@ def contar_exportacion(admin, f):
         return int(cur.fetchone()["n"])
 
 
+# ------------------------------------------------------------------ horario sensible sugerido (fase C)
+
+def suma_ventana(horas, inicio, largo=VENTANA_HORAS):
+    """Cuántos incidentes caen en las `largo` horas que empiezan en `inicio` (puede cruzar la medianoche)."""
+    return sum(horas[(inicio + k) % 24] for k in range(largo))
+
+
+def ventana_mas_cargada(horas, largo=VENTANA_HORAS):
+    """La hora de inicio de la ventana continua con más incidentes. Si hay empate, la que empieza más temprano."""
+    return max(range(24), key=lambda i: (suma_ventana(horas, i, largo), -i))
+
+
+def _horas_del_horario(inicio, fin):
+    """Las horas (0 a 23) que cubre un horario [inicio, fin), que puede cruzar la medianoche."""
+    if inicio <= fin:
+        return set(range(inicio, fin))
+    return set(range(inicio, 24)) | set(range(0, fin))
+
+
+def histograma_horas(admin, ahora=None):
+    """Incidentes por hora de Lima de los últimos 30 días, de toda la comunidad (no depende de los filtros de la pantalla)."""
+    ahora = _ahora(ahora)
+    p = {**_base(admin), "hoy": _hoy_lima(ahora), "ahora": ahora}
+    with db.cursor() as cur:
+        cur.execute(f"""SELECT EXTRACT(HOUR FROM {LOCAL})::int AS hora, count(*) AS n
+                        FROM events e JOIN cameras c ON c.id = e.camera_id
+                        WHERE {VISIBLE} AND e.community_id = %(comunidad)s AND e.status <> 'falsa alarma'
+                          AND e.occurred_at >= ((%(hoy)s::date - 29)::timestamp) AT TIME ZONE 'America/Lima'
+                          AND e.occurred_at <= %(ahora)s::timestamptz
+                        GROUP BY 1""", p)
+        filas = cur.fetchall()
+    horas = [0] * 24
+    for r in filas:
+        horas[r["hora"]] = int(r["n"])
+    return horas
+
+
+def horario_actual(admin):
+    """El horario sensible vigente de la comunidad: [inicio, fin] y si es el de fábrica (la comunidad no definió uno)."""
+    with db.cursor() as cur:
+        cur.execute("SELECT settings FROM communities WHERE id = %s", (str(admin["community_id"]),))
+        fila = cur.fetchone()
+    ajustes = fila["settings"] if fila and isinstance(fila["settings"], dict) else {}
+    definido = sources._sensitive_hours(ajustes.get("sensitive_hours"))
+    return (definido or list(HORARIO_DEFECTO)), definido is None
+
+
+def horario(admin, ahora=None):
+    """
+    El horario sensible sugerido: la ventana continua de 6 horas con más incidentes de los últimos 30 días (sin falsas alarmas), con el
+    porcentaje de incidentes que concentra, junto al horario vigente y qué porcentaje cubre. Con menos de 20 incidentes no sugiere nada.
+    """
+    horas = histograma_horas(admin, ahora)
+    total = sum(horas)
+    (a_ini, a_fin), por_defecto = horario_actual(admin)
+    cubiertas = _horas_del_horario(a_ini, a_fin)
+    en_actual = sum(horas[h] for h in cubiertas)
+    actual = {"inicio": a_ini, "fin": a_fin, "por_defecto": por_defecto, "incidentes": en_actual,
+              "porcentaje": round(en_actual * 100.0 / total) if total else 0}
+    if total < MIN_PARA_SUGERIR:
+        return {"estado": "sin_datos_suficientes", "total": total, "minimo": MIN_PARA_SUGERIR, "actual": actual, "sugerido": None, "igual": False}
+    ini = ventana_mas_cargada(horas)
+    n = suma_ventana(horas, ini)
+    sugerido = {"inicio": ini, "fin": (ini + VENTANA_HORAS) % 24, "incidentes": n, "porcentaje": round(n * 100.0 / total)}
+    return {"estado": "ok", "total": total, "minimo": MIN_PARA_SUGERIR, "actual": actual, "sugerido": sugerido,
+            "igual": (a_ini, a_fin) == (sugerido["inicio"], sugerido["fin"])}
+
+
+def aplicar_horario(admin, inicio, ip=None, ahora=None):
+    """
+    Aplica la sugerencia actual como horario sensible de la comunidad. El navegador manda la hora de inicio que vio; si desde entonces
+    la sugerencia cambió, se rechaza (409): nunca se aplica algo que el administrador no vio. Queda en audit_log con el horario anterior.
+    """
+    if isinstance(inicio, bool) or not isinstance(inicio, int) or not 0 <= inicio <= 23:
+        raise DashboardError(422, "inicio_invalido", "La hora de inicio debe ser un número entero de 0 a 23.")
+    h = horario(admin, ahora)
+    if h["estado"] != "ok":
+        raise DashboardError(409, "sin_datos_suficientes", f"Todavía no hay datos suficientes para sugerir un horario (se necesitan {MIN_PARA_SUGERIR} incidentes en 30 días).")
+    if inicio != h["sugerido"]["inicio"]:
+        raise DashboardError(409, "sugerencia_cambio", "La sugerencia cambió desde que la viste. Actualiza el panel y revísala otra vez.")
+    if h["igual"]:
+        raise DashboardError(409, "ya_aplicado", "Ese horario ya es el vigente.")
+    fin = h["sugerido"]["fin"]
+    with db.cursor() as cur:
+        cur.execute("SELECT settings FROM communities WHERE id = %s FOR UPDATE", (str(admin["community_id"]),))
+        antes = cur.fetchone()["settings"]
+        anterior = sources._sensitive_hours(antes.get("sensitive_hours")) if isinstance(antes, dict) else None
+        cur.execute("""UPDATE communities
+                       SET settings = jsonb_set(CASE WHEN jsonb_typeof(settings) = 'object' THEN settings ELSE '{}'::jsonb END,
+                                                '{sensitive_hours}', %s::jsonb, true)
+                       WHERE id = %s""", (json.dumps([inicio, fin]), str(admin["community_id"])))
+        cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id, ip, meta)
+                       VALUES ('user', %s, %s, 'apply_sensitive_hours', 'community', %s, %s, %s::jsonb)""",
+                    (str(admin["id"]), str(admin["community_id"]), str(admin["community_id"]), ip,
+                     json.dumps({"inicio": inicio, "fin": fin, "anterior": anterior})))
+    return {"inicio": inicio, "fin": fin, "anterior": anterior}
+
+
 def panel(admin, desde=None, hasta=None, camara=None, con_falsas=False, ahora=None):
     """Todo lo que muestra la pantalla, en un solo JSON."""
     ahora = _ahora(ahora)
@@ -324,6 +425,7 @@ def panel(admin, desde=None, hasta=None, camara=None, con_falsas=False, ahora=No
         "ranking": ranking(admin, f),
         "senales": senales(admin, f),
         "equipos": equipos(admin, ahora),
+        "horario": horario(admin, ahora),
         "opciones_camara": opciones_camara(admin),
         "exportacion": {"filas": filas, "limite": LIMITE_CSV, "recortada": filas > LIMITE_CSV},
     }

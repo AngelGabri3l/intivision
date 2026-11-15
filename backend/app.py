@@ -1071,6 +1071,23 @@ async def admin_panel_datos(desde: Optional[str] = None, hasta: Optional[str] = 
         return _panel_error(e)
 
 
+@app.post("/admin/panel/horario")
+async def admin_panel_horario(request: Request, user: dict = Depends(auth.require_admin)):
+    """Aplica el horario sensible sugerido (la hora de inicio que el administrador vio). Solo JSON: un formulario de otro sitio no puede mandarlo."""
+    if not request.headers.get("content-type", "").lower().startswith("application/json"):
+        return JSONResponse(status_code=415, content={"error": "Se esperaba JSON.", "code": "tipo_no_admitido"})
+    try:
+        cuerpo = await request.json()
+    except ValueError:
+        cuerpo = None
+    if not isinstance(cuerpo, dict):
+        return JSONResponse(status_code=422, content={"error": "El cuerpo debe ser un objeto JSON con la hora de inicio.", "code": "cuerpo_invalido"})
+    try:
+        return JSONResponse(content=await asyncio.to_thread(dashboard.aplicar_horario, user, cuerpo.get("inicio"), auth._clean_ip(auth.client_ip(request))))
+    except dashboard.DashboardError as e:
+        return _panel_error(e)
+
+
 @app.get("/admin/panel/exportar.csv")
 async def admin_panel_exportar(request: Request, desde: Optional[str] = None, hasta: Optional[str] = None,
                                camara: Optional[str] = None, user: dict = Depends(auth.require_admin)):

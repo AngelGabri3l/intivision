@@ -13,6 +13,8 @@
   var pedido = null;        // el AbortController del pedido en curso
   var secuencia = 0;        // cuál es el pedido más reciente: las respuestas viejas se ignoran
   var ultimo = null;        // los últimos datos recibidos (para volver a dibujar el mapa al girar el celular)
+  var avisoHorario = null;  // el resultado de la última vez que se intentó aplicar el horario: { texto, error }
+  var aplicando = false;    // mientras se aplica el horario, no se puede volver a pedir
 
   function porId(id) { return document.getElementById(id); }
 
@@ -184,7 +186,14 @@
 
   function nivelCalor(v, maximo) { return v === 0 ? 0 : Math.min(4, Math.ceil(v * 4 / maximo)); }
 
-  function dibujarCalor(c) {
+  function hh(h) { return (h < 10 ? "0" : "") + h + ":00"; }
+
+  function segmentos(ini, fin) {
+    if (ini < fin) { return [[ini, fin]]; }
+    return fin === 0 ? [[ini, 24]] : [[ini, 24], [0, fin]];        // cruza la medianoche: 22 a 6 son dos tramos
+  }
+
+  function dibujarCalor(c, horario) {
     var cont = porId("panel-calor");
     vaciar(cont);
     var mq = window.matchMedia ? window.matchMedia("(max-width: 640px)") : null;
@@ -201,7 +210,8 @@
     });
     var maximo = 0;
     celdas.forEach(function (f) { f.forEach(function (v) { if (v > maximo) { maximo = v; } }); });
-    var W = 720, L = 40, T = 24, R = 6, alto = 26, B = 8;
+    var conBandas = !!(horario && horario.actual);
+    var W = 720, L = 40, T = 24, R = 6, alto = 26, B = conBandas ? 34 : 8;
     var ancho = (W - L - R) / cols;
     var H = T + 7 * (alto + 2) + B;
     var s = svg("svg", { viewBox: "0 0 " + W + " " + H, "class": "panel__grafico", role: "img",
@@ -224,12 +234,28 @@
         s.appendChild(g);
       });
     });
+    if (conBandas) {
+      var yb = T + 7 * (alto + 2) + 6, ancho24 = (W - L - R) / 24;
+      var banda = function (h, clase, y, nombre) {
+        segmentos(h.inicio, h.fin).forEach(function (sg) {
+          var r = svg("rect", { x: L + sg[0] * ancho24, y: y, width: (sg[1] - sg[0]) * ancho24 - 2, height: 6, rx: 2, "class": clase });
+          r.appendChild(svg("title", {}, nombre + ": " + hh(h.inicio) + " a " + hh(h.fin)));
+          s.appendChild(r);
+        });
+      };
+      banda(horario.actual, "sv-banda-actual", yb, "Horario sensible actual");
+      if (horario.sugerido) { banda(horario.sugerido, "sv-banda-sugerida", yb + 10, "Horario sugerido"); }
+    }
     cont.appendChild(s);
 
     var items = [{ clase: "leyenda__muestra--calor-0", texto: "0" }];
     for (var nv = 1; nv <= 4; nv++) {
       var lo = Math.floor((nv - 1) * maximo / 4) + 1, hi = Math.floor(nv * maximo / 4);
       if (maximo > 0 && lo <= hi) { items.push({ clase: "leyenda__muestra--calor-" + nv, texto: lo === hi ? String(lo) : lo + "–" + hi }); }
+    }
+    if (conBandas) {
+      items.push({ clase: "leyenda__muestra--banda-actual", texto: "Horario sensible actual (" + hh(horario.actual.inicio) + " a " + hh(horario.actual.fin) + ")" });
+      if (horario.sugerido) { items.push({ clase: "leyenda__muestra--banda-sugerida", texto: "Horario sugerido (" + hh(horario.sugerido.inicio) + " a " + hh(horario.sugerido.fin) + ")" }); }
     }
     leyenda(porId("panel-calor-leyenda"), items);
     var nota = porId("panel-calor-nota");
@@ -241,6 +267,74 @@
       nota.className = "panel__nota panel__nota--aviso";
     }
     nota.textContent = texto;
+  }
+
+  // ------------------------------------------------------------------ horario sensible sugerido
+
+  function aplicarHorario(h) {
+    if (aplicando) { return; }
+    aplicando = true;
+    avisoHorario = { texto: "Aplicando el horario…", error: false };
+    dibujarHorario(h);
+    fetch("/admin/panel/horario", { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ inicio: h.sugerido.inicio }) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { return { r: r, d: d }; }); })
+      .then(function (x) {
+        aplicando = false;
+        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.ok) {
+          avisoHorario = { texto: "Listo: el horario sensible ahora es de " + hh(x.d.inicio) + " a " + hh(x.d.fin) + ". Las mini PC lo reciben en su siguiente latido.", error: false };
+        } else {
+          avisoHorario = { texto: x.r.status === 403 ? "Solo un administrador puede aplicar el horario." : (x.d && x.d.error ? x.d.error : "No se pudo aplicar el horario."), error: true };
+        }
+        cargar();
+      })
+      .catch(function () {
+        aplicando = false;
+        avisoHorario = { texto: "No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.", error: true };
+        if (ultimo) { dibujarHorario(ultimo.horario); }
+      });
+  }
+
+  function dibujarHorario(h) {
+    var cont = porId("panel-horario");
+    vaciar(cont);
+    if (!h) { return; }
+    cont.appendChild(nodo("h3", "panel__horario-titulo", "Horario sensible"));
+    var a = h.actual;
+    var actual = "Horario sensible actual: " + hh(a.inicio) + " a " + hh(a.fin) + (a.por_defecto ? " (el de fábrica: la comunidad no definió uno)" : "") + ".";
+    if (h.total > 0) { actual += " Cubre el " + a.porcentaje + " % de los incidentes de los últimos 30 días (" + a.incidentes + " de " + h.total + ")."; }
+    cont.appendChild(nodo("p", "", actual));
+    if (h.estado !== "ok") {
+      cont.appendChild(nodo("p", "", "Todavía no hay datos suficientes para sugerir un horario: hay " + plural(h.total, "incidente", "incidentes") + " en los últimos 30 días y se necesitan al menos " + h.minimo + "."));
+    } else {
+      var s = h.sugerido;
+      cont.appendChild(nodo("p", "", "Horario sugerido: " + hh(s.inicio) + " a " + hh(s.fin) + ". Concentra el " + s.porcentaje + " % de los incidentes (" + s.incidentes + " de " + h.total + ")."));
+      if (h.igual) {
+        cont.appendChild(nodo("p", "", "El horario actual ya es el sugerido."));
+      } else {
+        var caja = nodo("div", "panel__confirmar");
+        caja.hidden = true;
+        caja.appendChild(nodo("p", "", "¿Aplicar el horario sensible de " + hh(s.inicio) + " a " + hh(s.fin) + "? Las mini PC lo reciben en su siguiente latido (unos 30 segundos)."));
+        var fila = nodo("div", "panel__botones");
+        var si = nodo("button", "btn", "Sí, aplicar"); si.type = "button"; si.id = "horario-confirmar";
+        var no = nodo("button", "btn btn--texto", "Cancelar"); no.type = "button"; no.id = "horario-cancelar";
+        fila.appendChild(si); fila.appendChild(no); caja.appendChild(fila);
+        var boton = nodo("button", "btn", "Aplicar sugerencia"); boton.type = "button"; boton.id = "horario-aplicar";
+        boton.disabled = aplicando;
+        boton.addEventListener("click", function () {
+          avisoHorario = null;
+          var viejo = cont.querySelector(".panel__horario-estado");          // el resultado de la vez anterior ya no vale
+          if (viejo) { viejo.parentNode.removeChild(viejo); }
+          boton.hidden = true; caja.hidden = false; si.focus();
+        });
+        no.addEventListener("click", function () { caja.hidden = true; boton.hidden = false; boton.focus(); });
+        si.addEventListener("click", function () { aplicarHorario(h); });
+        cont.appendChild(boton);
+        cont.appendChild(caja);
+      }
+    }
+    if (avisoHorario) { cont.appendChild(nodo("p", "panel__horario-estado" + (avisoHorario.error ? " panel__horario-estado--error" : ""), avisoHorario.texto)); }
   }
 
   // ------------------------------------------------------------------ ranking de cámaras
@@ -367,7 +461,8 @@
     llenarFiltros(d);
     dibujarTarjetas(d);
     dibujarDiario(d.serie_diaria);
-    dibujarCalor(d.calor);
+    dibujarCalor(d.calor, d.horario);
+    dibujarHorario(d.horario);
     dibujarRanking(d.ranking);
     dibujarSenales(d.senales);
     dibujarEquipos(d.equipos);
@@ -422,7 +517,7 @@
   porId("f-falsas").addEventListener("change", cargar);
 
   var mq = window.matchMedia ? window.matchMedia("(max-width: 640px)") : null;
-  function girar() { if (ultimo) { dibujarCalor(ultimo.calor); } }
+  function girar() { if (ultimo) { dibujarCalor(ultimo.calor, ultimo.horario); } }
   if (mq) {
     if (mq.addEventListener) { mq.addEventListener("change", girar); } else if (mq.addListener) { mq.addListener(girar); }
   }
