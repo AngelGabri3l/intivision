@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard  # noqa: E402
+from backend import hitl, dashboard, mapa  # noqa: E402
 from backend.pages import fill, SOURCE_LABELS  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -195,13 +195,14 @@ def apply_security_headers(request: Request, response):
     h["X-Content-Type-Options"] = "nosniff"
     h["X-Frame-Options"] = "DENY"
     h["Referrer-Policy"] = "same-origin"
-    h["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=(), payment=(), usb=()"
+    h["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=(self), payment=(), usb=()"      # geolocation: solo nuestras páginas (ubicar una cámara con el GPS)
     h["Cross-Origin-Opener-Policy"] = "same-origin"
     h["Cross-Origin-Resource-Policy"] = "same-origin"
     # Las fotos pueden guardarse un rato en el navegador de su dueño y los íconos de la PWA en el de cualquiera; todo lo demás, nunca.
     ruta = request.url.path
     h["Cache-Control"] = ("private, max-age=600" if ruta.startswith("/evidence/")
-                          else "public, max-age=86400" if ruta.startswith("/icons/") else "no-store")
+                          else "private, max-age=86400" if ruta.startswith("/mapa/teselas/")
+                          else "public, max-age=86400" if ruta.startswith(("/icons/", "/static/leaflet/")) else "no-store")
     if auth.cookie_is_secure(request):
         h["Strict-Transport-Security"] = "max-age=31536000"
     if h.get("content-type", "").startswith("text/html"):
@@ -471,7 +472,7 @@ async def _base_no_disponible(request: Request, exc):
 @app.exception_handler(auth.NotAuthenticated)
 async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
-    pagina = request.url.path in ("/", "/admin") or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos"))
+    pagina = request.url.path in ("/", "/admin") or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos", "/admin/mapa"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
     if quiere_html:
         return RedirectResponse("/login", status_code=303)
@@ -1110,6 +1111,117 @@ def panel_page(request: Request, user: dict = Depends(auth.require_admin)):
     return HTMLResponse(pwa.inject(pages.render_panel(user, nonce), nonce))
 
 
+# ---------------------- mapa de calor por cámara y ubicación de las cámaras (H8, fase D) ----------------------
+
+_LEAFLET = {"leaflet.js": "application/javascript; charset=utf-8", "leaflet.css": "text/css; charset=utf-8"}
+_STATIC_LEAFLET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "leaflet")
+
+
+@app.get("/static/leaflet/{archivo}")
+def static_leaflet(archivo: str):
+    """Leaflet se sirve desde aquí y no desde un CDN: la política de seguridad no permite scripts de terceros. Solo estos dos archivos."""
+    tipo = _LEAFLET.get(archivo)
+    if tipo is None:
+        return JSONResponse(status_code=404, content={"error": "No existe."})
+    return FileResponse(os.path.join(_STATIC_LEAFLET, archivo), media_type=tipo)
+
+
+def _mapa_error(e):
+    return JSONResponse(status_code=e.status, content={"error": e.message, "code": e.code})
+
+
+async def _cuerpo_objeto(request: Request):
+    """El cuerpo JSON como diccionario, o la respuesta de error. Solo JSON: un formulario de otro sitio no puede mandarlo."""
+    if not request.headers.get("content-type", "").lower().startswith("application/json"):
+        return None, JSONResponse(status_code=415, content={"error": "Se esperaba JSON.", "code": "tipo_no_admitido"})
+    try:
+        cuerpo = await request.json()
+    except ValueError:
+        cuerpo = None
+    if not isinstance(cuerpo, dict):
+        return None, JSONResponse(status_code=422, content={"error": "El cuerpo debe ser un objeto JSON.", "code": "cuerpo_invalido"})
+    return cuerpo, None
+
+
+@app.get("/mapa/teselas/{z}/{x}/{y}.png")
+async def mapa_tesela(z: int, x: int, y: int, user: dict = Depends(auth.current_user)):
+    """Las imágenes del mapa, por nuestro servidor y con caché (ver backend/mapa.py). Las pide cualquier persona con sesión: los dueños
+    también eligen la ubicación de su cámara sobre el mapa."""
+    try:
+        datos = await asyncio.to_thread(mapa.obtener_tesela, str(user["id"]), z, x, y)
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+    return Response(content=datos, media_type="image/png")
+
+
+@app.get("/admin/mapa", response_class=HTMLResponse)
+def mapa_page(request: Request, user: dict = Depends(auth.require_admin)):
+    """El mapa de calor por cámara (H8): solo para administradores."""
+    nonce = request.state.csp_nonce
+    return HTMLResponse(pwa.inject(pages.render_mapa(user, nonce), nonce))
+
+
+@app.get("/admin/mapa/datos")
+async def admin_mapa_datos(desde: Optional[str] = None, hasta: Optional[str] = None, modo: str = "incidentes",
+                           user: dict = Depends(auth.require_admin)):
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.datos_mapa, user, desde, hasta, modo))
+    except (mapa.MapaError, dashboard.DashboardError) as e:
+        return _mapa_error(e)
+
+
+@app.post("/admin/camaras/{camera_id}/ubicacion")
+async def admin_camara_ubicacion(camera_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    """El administrador ubica una cámara de ZONA COMÚN (las privadas las ubica su dueño)."""
+    cuerpo, error = await _cuerpo_objeto(request)
+    if error:
+        return error
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.fijar_ubicacion, user, camera_id, cuerpo, auth._clean_ip(auth.client_ip(request)), "admin"))
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+
+
+@app.post("/admin/camaras/{camera_id}/ubicacion/quitar")
+async def admin_camara_ubicacion_quitar(camera_id: str, request: Request, user: dict = Depends(auth.require_admin)):
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.quitar_ubicacion, user, camera_id, auth._clean_ip(auth.client_ip(request)), "admin"))
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+
+
+@app.post("/cameras/{camera_id}/ubicacion")
+async def camera_ubicacion(camera_id: str, request: Request, user: dict = Depends(auth.current_user)):
+    """El dueño de una cámara privada fija su ubicación y decide si el administrador puede verla en el mapa (apagado por defecto)."""
+    cuerpo, error = await _cuerpo_objeto(request)
+    if error:
+        return error
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.fijar_ubicacion, user, camera_id, cuerpo, auth._clean_ip(auth.client_ip(request)), "dueno"))
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+
+
+@app.post("/cameras/{camera_id}/ubicacion/quitar")
+async def camera_ubicacion_quitar(camera_id: str, request: Request, user: dict = Depends(auth.current_user)):
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.quitar_ubicacion, user, camera_id, auth._clean_ip(auth.client_ip(request)), "dueno"))
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+
+
+@app.post("/cameras/{camera_id}/ubicacion/mapa")
+async def camera_ubicacion_mapa(camera_id: str, request: Request, user: dict = Depends(auth.current_user)):
+    """El dueño da o retira el permiso de mostrar su cámara en el mapa del administrador."""
+    cuerpo, error = await _cuerpo_objeto(request)
+    if error:
+        return error
+    try:
+        return JSONResponse(content=await asyncio.to_thread(mapa.cambiar_visibilidad_mapa, user, camera_id, cuerpo.get("visible"), auth._clean_ip(auth.client_ip(request))))
+    except mapa.MapaError as e:
+        return _mapa_error(e)
+
+
 @app.get("/events")
 def events(limit: int = 100, user: dict = Depends(auth.current_user)):
     return list_events(user, limit)
@@ -1198,7 +1310,7 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
                 (user["id"], user["community_id"], cam["user_id"], cam["id"], auth._clean_ip(auth.client_ip(request))))
     return HTMLResponse(pwa.inject(pages.render_camera(
         user, cam, rows[:limite], nivel, desde if d_desde else "", hasta if d_hasta else "", limite,
-        len(rows) > limite, aviso, nonce=request.state.csp_nonce), request.state.csp_nonce))
+        len(rows) > limite, aviso, nonce=request.state.csp_nonce, ubicacion=mapa.ficha_ubicacion(user, cam)), request.state.csp_nonce))
 
 
 @app.post("/cameras/{camera_id}/visibilidad")

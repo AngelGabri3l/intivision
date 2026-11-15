@@ -15,6 +15,7 @@
   var ultimo = null;        // los últimos datos recibidos (para volver a dibujar el mapa al girar el celular)
   var avisoHorario = null;  // el resultado de la última vez que se intentó aplicar el horario: { texto, error }
   var aplicando = false;    // mientras se aplica el horario, no se puede volver a pedir
+  var camaraInicial = "";   // la cámara con la que se abrió la página (el mapa enlaza aquí): vale solo para el primer pedido
 
   function porId(id) { return document.getElementById(id); }
 
@@ -458,6 +459,7 @@
 
   function render(d) {
     ultimo = d;
+    camaraInicial = "";
     llenarFiltros(d);
     dibujarTarjetas(d);
     dibujarDiario(d.serie_diaria);
@@ -471,7 +473,7 @@
 
   function consulta() {
     var q = [];
-    var desde = porId("f-desde").value, hasta = porId("f-hasta").value, camara = porId("f-camara").value;
+    var desde = porId("f-desde").value, hasta = porId("f-hasta").value, camara = porId("f-camara").value || camaraInicial;
     if (desde) { q.push("desde=" + encodeURIComponent(desde)); }
     if (hasta) { q.push("hasta=" + encodeURIComponent(hasta)); }
     if (camara) { q.push("camara=" + encodeURIComponent(camara)); }
@@ -521,6 +523,15 @@
   if (mq) {
     if (mq.addEventListener) { mq.addEventListener("change", girar); } else if (mq.addListener) { mq.addListener(girar); }
   }
+
+  // El mapa enlaza aquí con el rango y la cámara que estaba mirando: ?desde=AAAA-MM-DD&hasta=AAAA-MM-DD&camara=<id>
+  (function leerInicial() {
+    var q = new URLSearchParams(window.location.search);
+    var fecha = /^\d{4}-\d{2}-\d{2}$/, id = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (fecha.test(q.get("desde") || "")) { porId("f-desde").value = q.get("desde"); }
+    if (fecha.test(q.get("hasta") || "")) { porId("f-hasta").value = q.get("hasta"); }
+    if (id.test(q.get("camara") || "")) { camaraInicial = q.get("camara"); }
+  })();
 
   cargar();
 })();

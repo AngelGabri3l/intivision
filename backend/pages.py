@@ -71,9 +71,17 @@ def panel_link(user, active=None) -> str:
     return f'<a class="volver" id="nav-panel" href="/admin"{actual}>Panel</a>'
 
 
+def mapa_link(user, active=None) -> str:
+    """El enlace «Mapa» del menú, solo para administradores."""
+    if user.get("role") != "community_admin":
+        return ""
+    actual = ' aria-current="page"' if active == "mapa" else ""
+    return f'<a class="volver" id="nav-mapa" href="/admin/mapa"{actual}>Mapa</a>'
+
+
 def admin_links(user, active=None) -> str:
-    """Los enlaces que solo ve un administrador: Panel, Pendientes (con su número) y Equipos."""
-    return panel_link(user, active) + pending_link(user, active) + equipos_link(user, active)
+    """Los enlaces que solo ve un administrador: Panel, Mapa, Pendientes (con su número) y Equipos."""
+    return panel_link(user, active) + mapa_link(user, active) + pending_link(user, active) + equipos_link(user, active)
 
 
 def nav(user, active) -> str:
@@ -198,7 +206,7 @@ def live_block(cam, nonce) -> str:
                 script=fill(read_template("vivo.js"), camera_id=esc(cam["id"])))
 
 
-def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="") -> str:
+def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="", ubicacion=None) -> str:
     es_dueno = cam["user_id"] == user["id"]
     admin = user["role"] == "community_admin"
     filtrando = bool(nivel or desde or hasta)
@@ -260,7 +268,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
         nombre=esc(cam["name"]), lugar=esc(cam["place"]) if cam["place"] else "Sin lugar indicado.",
         aviso=alert_block(message, "alerta"), resumen=resumen, datos=datos, visibilidad=visibilidad,
         filtros=filtros, total=esc(count_text(len(events), "evento", "eventos")) + ("+" if has_more else ""),
-        eventos=lista, mas=mas, vivo=live_block(cam, nonce))
+        eventos=lista, mas=mas, vivo=live_block(cam, nonce), ubicacion=ubicacion_block(cam, ubicacion, nonce))
 
 
 # ------------------------------------------------------------------ alertas por Telegram
@@ -285,6 +293,28 @@ def render_pending(user, nonce) -> str:
 def render_panel(user, nonce) -> str:
     """El panel de incidentes (H8). Los datos los pide el navegador a /admin/panel/datos."""
     return fill(read_template("panel.html"), nav=nav(user, "panel"), nonce=esc(nonce), script=read_template("panel.js"))
+
+
+def render_mapa(user, nonce) -> str:
+    """El mapa de calor por cámara (H8). Los datos los pide el navegador a /admin/mapa/datos."""
+    return fill(read_template("mapa.html"), nav=nav(user, "mapa"), nonce=esc(nonce),
+                script=read_template("coordenadas.js") + "\n" + read_template("mapa.js"))
+
+
+def ubicacion_block(cam, ubic, nonce) -> str:
+    """La sección «Ubicación de la cámara» de la ficha. Solo la ve el dueño de una cámara privada (ubic es None para los demás)."""
+    if not ubic:
+        return ""
+    def num(v):
+        return "" if v is None else repr(float(v))
+    centro = ubic["centro"]
+    atributos = (f'data-camara="{esc(cam["id"])}" data-lat="{num(ubic["lat"])}" data-lng="{num(ubic["lng"])}" '
+                 f'data-precision="{"" if ubic["precision_m"] is None else int(ubic["precision_m"])}" '
+                 f'data-visible="{1 if ubic["visible_en_mapa"] else 0}" data-admin-ve="{1 if ubic["admin_puede_ver"] else 0}" '
+                 f'data-fijada="{esc(ubic["fijada_en"] or "")}" data-centro-lat="{num(centro["lat"])}" data-centro-lng="{num(centro["lng"])}" '
+                 f'data-centro-definido="{1 if centro["definido"] else 0}"')
+    return fill(read_template("ubicacion.html"), atributos=atributos, nonce=esc(nonce),
+                script=read_template("coordenadas.js") + "\n" + read_template("ubicacion.js"))
 
 
 def render_equipos(user, nonce) -> str:

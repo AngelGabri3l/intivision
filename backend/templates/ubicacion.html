@@ -1,0 +1,29 @@
+<section class="ubic" id="ubicacion" aria-labelledby="titulo-ubic" {atributos}>
+<style>
+.ubic { display: grid; gap: 10px; margin-top: 20px; padding: 14px 16px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--card)); }
+.ubic__titulo { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.ubic p { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.ubic__suave { color: hsl(var(--muted-foreground)); font-size: 13px; }
+.ubic__mensaje { font-weight: 700; }
+.ubic__mensaje--error { color: hsl(var(--destructive)); }
+.ubic__botones { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ubic__botones .btn { min-height: 44px; }
+.ubic__editor { display: grid; gap: 10px; padding: 12px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--muted)); }
+.ubic__editor[hidden], .ubic__lejos[hidden] { display: none; }
+.ubic__mapa { height: 280px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--background)); position: relative; z-index: 0; cursor: crosshair; }
+.ubic__campo { display: grid; gap: 4px; }
+.ubic__campo input[type="text"] { min-height: 44px; font: inherit; padding: 6px 10px; border: 1px solid hsl(var(--border)); background: hsl(var(--background)); color: hsl(var(--foreground)); }
+.ubic__lejos { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--card)); }
+.ubic__consentimiento { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.ubic__consentimiento input { width: 18px; height: 18px; margin-top: 2px; accent-color: hsl(var(--primary)); flex: none; }
+.ubic-pin-caja { background: none; border: 0; }
+.ubic-pin { width: 100%; height: 100%; box-sizing: border-box; border-radius: 50%; background: #ff6a00; border: 3px solid #0a0a0a; }
+</style>
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<h2 class="ubic__titulo" id="titulo-ubic">Ubicación de la cámara</h2>
+<p class="ubic__suave">Dónde está esta cámara. Es opcional. Solo el administrador de la comunidad puede verla en su mapa, y únicamente si tú lo permites. Puedes quitarla cuando quieras.</p>
+<div id="ubic-cuerpo"></div>
+<noscript><p class="ubic__suave">Esta sección necesita JavaScript.</p></noscript>
+</section>
+<script nonce="{nonce}" src="/static/leaflet/leaflet.js"></script>
+<script nonce="{nonce}">{script}</script>

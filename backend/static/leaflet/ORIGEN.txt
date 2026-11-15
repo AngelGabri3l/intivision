@@ -1,0 +1,5 @@
+Leaflet 1.9.4 (BSD-2-Clause), copiado sin cambios de dist/leaflet.js y dist/leaflet.css del paquete npm leaflet@1.9.4.
+Integridad del paquete (npm view leaflet@1.9.4 dist.integrity):
+sha512-nxS1ynzJOmOlHp+iL3FyWqK89GtNL8U8rvlMOsQdTTssxZwCXh8N2NB3GDQOL+YR3XnWyZAxwQixURb+FA74PA==
+Para comprobarlo: npm pack leaflet@1.9.4 y comparar los dos archivos con SHA256SUMS.
+Se sirve desde nuestro servidor (no desde un CDN) por la política de seguridad: el sitio no permite scripts de terceros.

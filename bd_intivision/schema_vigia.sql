@@ -164,10 +164,22 @@ CREATE TABLE cameras (
     created_at        timestamptz NOT NULL DEFAULT now(),
     source_id           uuid,                   -- la fuente de la mini PC de la que viene (H4)
     offline_notified_at timestamptz,            -- cuándo se avisó de que dejó de dar señal (H4)
+    lat                 double precision,       -- ubicación exacta de la cámara (H8, migración 005); la fija su dueño o el administrador
+    lng                 double precision,
+    location_accuracy_m integer,
+    location_set_at     timestamptz,
+    location_set_by     uuid REFERENCES users (id) ON DELETE SET NULL,
+    map_visible         boolean     NOT NULL DEFAULT false,   -- consentimiento del dueño para verla en el mapa del administrador
+    map_visible_at      timestamptz,
     UNIQUE (community_id, name),
     CONSTRAINT ux_cameras_id_community UNIQUE (id, community_id),
     CONSTRAINT ux_cameras_source UNIQUE (source_id),
     CHECK ((kind = 'private' AND user_id IS NOT NULL) OR (kind = 'common' AND user_id IS NULL)),
+    CONSTRAINT ck_cameras_ubicacion CHECK (
+        (lat IS NULL) = (lng IS NULL)
+        AND (lat IS NULL OR (lat BETWEEN -90 AND 90 AND lng BETWEEN -180 AND 180))
+        AND (location_accuracy_m IS NULL OR location_accuracy_m BETWEEN 0 AND 100000)
+        AND (map_visible = false OR lat IS NOT NULL)),
     FOREIGN KEY (user_id, community_id)
         REFERENCES users (id, community_id) ON DELETE CASCADE,
     FOREIGN KEY (edge_device_id, community_id)

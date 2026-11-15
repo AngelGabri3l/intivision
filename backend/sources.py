@@ -167,6 +167,12 @@ def upsert_inventory(edge, inventario):
 
 # ------------------------------------------------------------------ configuración de la mini PC
 
+def _borrar_ubicacion(cur, camera_id):
+    """Una cámara archivada pierde su ubicación (dato personal). Import local: mapa usa dashboard, que a su vez usa este módulo."""
+    from backend import mapa
+    mapa.limpiar_ubicacion(cur, camera_id)
+
+
 def _sensitive_hours(valor):
     """[hora de inicio, hora de fin] (0 a 23), o None si la comunidad no definió un horario válido."""
     if (isinstance(valor, (list, tuple)) and len(valor) == 2
@@ -325,6 +331,7 @@ def assign_source(admin, source_id, data, reassign=False, ip=None):
                                       name = left(name, 35) || ' (archivada ' || to_char(now(), 'YYYY-MM-DD')
                                              || ' ' || left(id::text, 8) || ')'
                                WHERE id = %s""", (actual["id"],))
+                _borrar_ubicacion(cur, actual["id"])
                 archivada = actual["id"]
             if datos["owner_id"]:
                 cur.execute("SELECT count(*) AS n FROM cameras WHERE user_id = %s AND is_active", (datos["owner_id"],))
@@ -380,6 +387,7 @@ def unassign_source(admin, source_id, ip=None):
                               name = left(name, 35) || ' (archivada ' || to_char(now(), 'YYYY-MM-DD')
                                      || ' ' || left(id::text, 8) || ')'
                        WHERE id = %s""", (actual["id"],))
+        _borrar_ubicacion(cur, actual["id"])
         meta = {"camera_id": actual["id"], "device_key": fuente["device_key"], "edge_device_id": fuente["edge_device_id"]}
         cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action,
                                               entity, entity_id, ip, meta)
