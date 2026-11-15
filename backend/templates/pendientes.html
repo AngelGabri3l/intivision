@@ -114,9 +114,23 @@ button, input { font: inherit; color: inherit; }
   font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; text-decoration: none; white-space: nowrap;
 }
 .volver:hover { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
-button.volver { background: none; cursor: pointer; font-family: inherit; }
-.cabecera__nav { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
-.cabecera__nav form { margin: 0; }
+.cabecera__usuario { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.cabecera__usuario form { margin: 0; }
+.cabecera__usuario .usuario { max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.salir {
+  min-height: 44px; padding: 0 2px; background: none; border: 0; color: hsl(var(--foreground)); cursor: pointer; font-family: inherit;
+  font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; text-decoration: underline; text-underline-offset: 5px; white-space: nowrap;
+}
+.salir:hover { color: hsl(var(--accent)); }
+.cabecera__pestanas { border-top: 1px solid hsl(var(--border)); }
+.cabecera__tabs { display: flex; gap: 4px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+.cabecera__tabs::-webkit-scrollbar { display: none; }
+.pestana {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-bottom: 3px solid transparent;
+  color: hsl(var(--muted-foreground)); font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; text-decoration: none;
+}
+.pestana:hover { color: hsl(var(--foreground)); }
+.pestana[aria-current="page"] { color: hsl(var(--foreground)); border-bottom-color: hsl(var(--accent)); }
 .usuario { color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 
 .seccion { padding-block: clamp(32px, 6vw, 64px); }
@@ -204,6 +218,9 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
   .zona { padding: 28px 16px; }
   .btn { width: 100%; }
   .volver { padding: 8px 10px; }
+  .pestana { padding: 0 10px; }
+  .cabecera__usuario { gap: 12px; }
+  .cabecera__usuario .usuario { max-width: 16ch; }
 }
 
 /* --- 7. Movimiento reducido --------------------------------------------------- */
@@ -212,7 +229,6 @@ button.volver { background: none; cursor: pointer; font-family: inherit; }
   .spinner { border-color: hsl(var(--primary-foreground)); border-radius: 0; width: 8px; height: 8px; }
 }
 a.btn { text-decoration: none; }
-.volver[aria-current="page"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
 /* --- Campos de formulario (el panel original no tenía; usan los mismos tokens) --- */
 .campo { display: grid; gap: 8px; }
 .campo__etiqueta { color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
@@ -226,7 +242,6 @@ a.btn { text-decoration: none; }
 .campo--camara { margin-bottom: 4px; }
 .zona__ayuda a { color: inherit; }
 a.btn { text-decoration: none; }
-.volver[aria-current="page"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
 /* --- Campos de formulario (el panel original no tenía; usan los mismos tokens) --- */
 .campo { display: grid; gap: 8px; }
 .campo__etiqueta { color: hsl(var(--muted-foreground)); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
@@ -299,16 +314,7 @@ a.btn { text-decoration: none; }
 <a class="saltar" href="#principal">Saltar al contenido</a>
 
 <header class="cabecera">
-  <div class="contenedor cabecera__fila">
-    <div class="marca">
-      <span class="marca__nombre pixel">INTIVISION</span>
-      <span class="marca__modulo">Guardian</span>
-      <span class="marca__detalle">Pendientes</span>
-    </div>
-    <nav aria-label="Principal" class="cabecera__nav">
-      {nav}
-    </nav>
-  </div>
+  {nav}
 </header>
 
 <main id="principal">

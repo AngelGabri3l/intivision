@@ -52,7 +52,7 @@ def pending_link(user, active=None) -> str:
         log.warning("No se pudo contar las alertas pendientes para el menú", exc_info=True)
         n = 0
     actual = ' aria-current="page"' if active == "pendientes" else ""
-    return f'<a class="volver" id="nav-pendientes" href="/admin/pendientes"{actual}>Pendientes{f" ({n})" if n else ""}</a>'
+    return f'<a class="pestana" id="nav-pendientes" href="/admin/pendientes"{actual}>Pendientes{f" ({n})" if n else ""}</a>'
 
 
 def equipos_link(user, active=None) -> str:
@@ -60,7 +60,7 @@ def equipos_link(user, active=None) -> str:
     if user.get("role") != "community_admin":
         return ""
     actual = ' aria-current="page"' if active == "equipos" else ""
-    return f'<a class="volver" id="nav-equipos" href="/admin/equipos"{actual}>Equipos</a>'
+    return f'<a class="pestana" id="nav-equipos" href="/admin/equipos"{actual}>Equipos</a>'
 
 
 def panel_link(user, active=None) -> str:
@@ -68,7 +68,7 @@ def panel_link(user, active=None) -> str:
     if user.get("role") != "community_admin":
         return ""
     actual = ' aria-current="page"' if active == "panel" else ""
-    return f'<a class="volver" id="nav-panel" href="/admin"{actual}>Panel</a>'
+    return f'<a class="pestana" id="nav-panel" href="/admin"{actual}>Panel</a>'
 
 
 def mapa_link(user, active=None) -> str:
@@ -76,7 +76,7 @@ def mapa_link(user, active=None) -> str:
     if user.get("role") != "community_admin":
         return ""
     actual = ' aria-current="page"' if active == "mapa" else ""
-    return f'<a class="volver" id="nav-mapa" href="/admin/mapa"{actual}>Mapa</a>'
+    return f'<a class="pestana" id="nav-mapa" href="/admin/mapa"{actual}>Mapa</a>'
 
 
 def admin_links(user, active=None) -> str:
@@ -85,13 +85,20 @@ def admin_links(user, active=None) -> str:
 
 
 def nav(user, active) -> str:
-    def link(href, text, key):
-        actual = ' aria-current="page"' if key == active else ""
-        return f'<a class="volver" href="{href}"{actual}>{text}</a>'
-    return (f'<span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
-            + link("/cameras", "Cámaras", "camaras")
-            + link("/alerts", "Alertas", "alertas") + admin_links(user, active)
-            + '<form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>')
+    """
+    La cabecera completa menos su marco: en la primera fila la marca, y a la derecha el usuario con «Cerrar sesión»; en la segunda, las
+    pestañas. El vecino ve Cámaras y Alertas; el administrador, además, Panel, Mapa, Pendientes y Equipos.
+    """
+    def pestana(href, texto, clave):
+        actual = ' aria-current="page"' if clave == active else ""
+        return f'<a class="pestana" href="{href}"{actual}>{texto}</a>'
+    return ('<div class="contenedor cabecera__fila"><div class="marca">'
+            '<span class="marca__nombre pixel">INTIVISION</span><span class="marca__modulo">Guardian</span></div>'
+            f'<div class="cabecera__usuario"><span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
+            '<form method="post" action="/logout"><button class="salir" type="submit">Cerrar sesión</button></form></div></div>'
+            '<nav aria-label="Principal" class="cabecera__pestanas"><div class="contenedor cabecera__tabs">'
+            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas") + admin_links(user, active)
+            + '</div></nav>')
 
 
 _ALERT_LABELS = {"error": "Error", "alerta": "Aviso", "ok": "Listo", "info": "Info"}
