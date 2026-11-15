@@ -1,5 +1,5 @@
 """
-PWA (H7): lo que permite instalar VIGÍA en el celular como una aplicación.
+PWA (H7): lo que permite instalar INTIVISION en el celular como una aplicación.
 
   • manifest.webmanifest: nombre, colores, íconos y que abra a pantalla completa.
   • Íconos: se dibujan aquí mismo (no hay archivos binarios en el repositorio).
@@ -22,7 +22,7 @@ ICONOS = {"icon-192.png": (192, False), "icon-512.png": (512, False), "icon-mask
 
 def manifest() -> dict:
     return {
-        "name": "VIGÍA", "short_name": "VIGÍA", "description": "Vigilancia vecinal con cámaras", "lang": "es",
+        "name": "INTIVISION", "short_name": "INTIVISION", "description": "Vigilancia vecinal con cámaras", "lang": "es",
         "start_url": "/cameras", "scope": "/", "display": "standalone", "orientation": "portrait",
         "background_color": FONDO, "theme_color": FONDO,
         "icons": [
@@ -58,7 +58,7 @@ def icono(nombre: str):
 
 
 SERVICE_WORKER = """\
-// VIGÍA: service worker mínimo. Solo guarda la página «sin conexión» y el ícono. Nada de cámaras, fotos ni sesiones.
+// INTIVISION: service worker mínimo. Solo guarda la página «sin conexión» y el ícono. Nada de cámaras, fotos ni sesiones.
 const CACHE = 'vigia-sin-conexion-v1';
 const BASICOS = ['/offline.html', '/icons/icon-192.png'];
 
@@ -83,10 +83,10 @@ self.addEventListener('fetch', function (e) {
 
 OFFLINE_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b1220"><title>Sin conexión · VIGÍA</title>
+<meta name="theme-color" content="#0b1220"><title>Sin conexión · INTIVISION</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1220;color:#e6edf7;font-family:system-ui,sans-serif;text-align:center;padding:24px}
 h1{font-size:1.6rem;margin:0 0 8px}p{margin:0;color:#9fb0c8}</style></head>
-<body><main><h1>Sin conexión</h1><p>VIGÍA necesita internet para mostrar tus cámaras. Vuelve a intentarlo cuando tengas señal.</p></main></body></html>
+<body><main><h1>Sin conexión</h1><p>INTIVISION necesita internet para mostrar tus cámaras. Vuelve a intentarlo cuando tengas señal.</p></main></body></html>
 """
 
 HEAD_TAGS = (
@@ -95,7 +95,7 @@ HEAD_TAGS = (
     '<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">'
     '<meta name="mobile-web-app-capable" content="yes">'
     '<meta name="apple-mobile-web-app-capable" content="yes">'
-    '<meta name="apple-mobile-web-app-title" content="VIGÍA">'
+    '<meta name="apple-mobile-web-app-title" content="INTIVISION">'
 )
 
 

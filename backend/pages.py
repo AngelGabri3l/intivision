@@ -89,7 +89,7 @@ def nav(user, active) -> str:
         actual = ' aria-current="page"' if key == active else ""
         return f'<a class="volver" href="{href}"{actual}>{text}</a>'
     return (f'<span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
-            + link("/", "Analizar", "analizar") + link("/cameras", "Cámaras", "camaras")
+            + link("/cameras", "Cámaras", "camaras")
             + link("/alerts", "Alertas", "alertas") + admin_links(user, active)
             + '<form method="post" action="/logout"><button class="volver" type="submit">Cerrar sesión</button></form>')
 
@@ -169,24 +169,21 @@ def camera_card(c, user) -> str:
 
 # ------------------------------------------------------------------ pantallas
 
-def render_cameras(user, cams, message=None, values=("", "")) -> str:
+def render_cameras(user, cams, message=None) -> str:
     admin = user["role"] == "community_admin"
     if cams:
         tarjetas = "".join(camera_card(c, user) for c in cams)
     else:
         tarjetas = ('<div class="vacio"><p class="vacio__titulo">Aún no tienes cámaras</p>'
-                    '<p class="vacio__texto">Agrega la primera con el formulario de arriba, o ve a «Analizar»: '
-                    'si no tienes ninguna, se crea una automáticamente.</p></div>')
+                    '<p class="vacio__texto">Tu administrador te asignará una desde el panel de equipos y cámaras.</p></div>')
+    tarjetas = alert_block(message) + tarjetas              # el aviso de «esa cámara no existe» va encima de la lista
     return fill(
         read_template("camaras.html"),
         nav=nav(user, "camaras"),
         titulo="Cámaras de la comunidad" if admin else "Mis cámaras",
         descripcion=("Ves las cámaras de toda tu comunidad. Las de los vecinos aparecen mientras su dueño "
                      "no te las oculte." if admin else
-                     "Cada cámara tiene su propio historial de eventos. Agrega las tuyas y elige con cuál "
-                     "transmitir o subir un video desde «Analizar»."),
-        mensaje=alert_block(message),
-        nombre=esc(values[0]), lugar=esc(values[1]),
+                     "Las cámaras que tu administrador te asignó, cada una con su historial de eventos."),
         titulo_lista="Todas las cámaras" if admin else "Tus cámaras",
         total=esc(count_text(len(cams), "cámara", "cámaras")) if cams else "",
         tarjetas=tarjetas)

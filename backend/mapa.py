@@ -15,7 +15,6 @@ la variable MAP_TILE_URL), solo se aceptan números z/x/y dentro de rango, no se
 tiene que ser un PNG, hay caché en disco (la política de OpenStreetMap pide guardar al menos 7 días) y un límite de pedidos por persona.
 El mapa gratuito de OpenStreetMap sirve para arrancar y ensayar; con tráfico real hay que usar un proveedor con clave o mapas propios.
 """
-import datetime
 import json
 import logging
 import math

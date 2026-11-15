@@ -4,8 +4,6 @@ import re
 import sys
 import asyncio
 import threading
-import time
-import tempfile
 import unicodedata
 import logging
 import datetime
@@ -14,12 +12,9 @@ import secrets
 from typing import Optional
 from urllib.parse import urlparse
 
-import cv2
-import numpy as np
 import psycopg2
 import psycopg2.pool
-from fastapi import (FastAPI, UploadFile, File, Request, WebSocket,
-                     WebSocketDisconnect, Depends, Form)
+from fastapi import FastAPI, Request, WebSocket, Depends, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response, StreamingResponse
 
 # Permite importar los módulos del proyecto (engine, etc.) desde la carpeta padre.
@@ -27,19 +22,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
 from backend import hitl, dashboard, mapa  # noqa: E402
-from backend.pages import fill, SOURCE_LABELS  # noqa: E402
+from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE, "backend", "data")
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 EVIDENCE_DIR = os.path.join(BASE, "events")  # compartido con el detector
 live.configure(EVIDENCE_DIR)
 CONFIG_PATH = os.path.join(BASE, "config.yaml")
 TEMPLATES_DIR = os.path.join(BASE, "backend", "templates")
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))   # igual que el límite de la página
-TMP_PREFIX = "vigia_upload_"                                    # nombre de los videos en análisis
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO,
@@ -50,7 +41,6 @@ log = logging.getLogger("backend")
 _docs = os.environ.get("ENABLE_DOCS") == "1"
 app = FastAPI(title="GUARDIAN Backend", docs_url="/docs" if _docs else None,
               redoc_url="/redoc" if _docs else None, openapi_url="/openapi.json" if _docs else None)
-_engine = None       # se crea en el primer análisis (carga modelos; puede tardar)
 _dispatcher = None   # actuador (sirena por MQTT), creado una vez
 
 
@@ -60,30 +50,12 @@ def load_cfg():
     return load_config(CONFIG_PATH)
 
 
-def get_engine():
-    global _engine
-    if _engine is None:
-        from engine import GuardianEngine  # import diferido (carga modelos)
-        _engine = GuardianEngine(load_cfg())
-    return _engine
-
-
 # ---------------------- seguridad: utilidades ----------------------
 
 MENSAJE_ACCESO = "Usuario o contraseña incorrectos."      # el MISMO texto para todo fallo: no revela qué cuentas existen
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
-MAX_LABEL_CHARS = 80
 NIVELES = ("BAJO", "MEDIO", "ALTO")
 IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-
-
-def clean_filename(name):
-    """Nombre seguro a partir del que manda el navegador: sin carpetas, sin símbolos raros, de largo acotado."""
-    base = os.path.basename((name or "video").replace("\\", "/")).replace(" ", "_")
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
-    base = re.sub(r"\.{2,}", ".", base).strip("._-") or "video"
-    return base[-MAX_LABEL_CHARS:]                          # se conserva el final para no perder la extensión
 
 
 EVENT_MAX_AGE = datetime.timedelta(hours=48)       # un evento más viejo que esto se guarda con la hora del servidor
@@ -212,30 +184,6 @@ def apply_security_headers(request: Request, response):
         h["Content-Security-Policy"] = "default-src 'none'; connect-src 'self'; frame-ancestors 'none'"
     else:
         h["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-
-
-# ---------------------- videos subidos (temporales) ----------------------# ---------------------- videos subidos (temporales) ----------------------
-
-def clean_leftovers():
-    """Si el servidor se cayó en pleno análisis, quedan videos a medias: se borran al arrancar."""
-    borrados = 0
-    for name in os.listdir(UPLOAD_DIR):
-        if name.startswith(TMP_PREFIX):
-            try:
-                os.remove(os.path.join(UPLOAD_DIR, name))
-                borrados += 1
-            except OSError:
-                pass
-    return borrados
-
-
-def upload_too_big(request: Request) -> bool:
-    """Rechaza una subida enorme ANTES de recibirla, según la cabecera Content-Length."""
-    try:
-        declarado = int(request.headers.get("content-length", "0"))
-    except ValueError:
-        return False
-    return declarado > (MAX_UPLOAD_MB + 1) * 1024 * 1024          # +1 MB de margen de la cabecera
 
 
 # ---------------------- eventos en PostgreSQL ----------------------
@@ -404,51 +352,6 @@ def get_dispatcher():
     return _dispatcher
 
 
-def dispatch_alerts(events, source):
-    """
-    Sirena de un video analizado: una orden MQTT por evento (WARN para MEDIO, ON para ALTO), para verla en Wokwi.
-    Se ejecuta en un hilo (tiene pausas). El aviso por Telegram sale por la cola de alertas, no por aquí.
-    """
-    d = get_dispatcher()
-    if not d["enabled"]:
-        log.info("Despacho de alertas desactivado (analysis.dispatch_alerts=false).")
-        return
-    if not events:
-        log.info("Video %s: sin eventos MEDIO/ALTO, no se activa ninguna alerta.", source)
-        return
-    log.warning("Video %s: despachando %d alerta(s)...", source, len(events))
-    for e in events:
-        log.warning("Evento en t=%ss | nivel %s | puntaje %s | %s",
-                    e["video_time_s"], e["level"], e["score"], e["reasons"])
-        if e["level"] == "ALTO":
-            d["actuator"].trigger(d["siren_s"])
-        elif e["level"] == "MEDIO":
-            d["actuator"].warn()
-        time.sleep(0.5)  # separa los mensajes para verlos uno a uno en Wokwi
-
-
-LEVEL_COOLDOWN = {"MEDIO": 45, "ALTO": 20}   # segundos entre órdenes a la sirena, por cámara
-_last_alert = {}
-
-
-def dispatch_live_alert(event, camera_id=None):
-    """Sirena de un evento en vivo, con espera por cámara y nivel para no saturar."""
-    d = get_dispatcher()
-    if not d["enabled"]:
-        return
-    now = time.time()
-    level = event["level"]
-    clave = (camera_id, level)
-    if now - _last_alert.get(clave, 0) < LEVEL_COOLDOWN.get(level, 30):
-        return
-    _last_alert[clave] = now
-    log.warning("EN VIVO | nivel %s | puntaje %s | %s", level, event["score"], event["reasons"])
-    if level == "ALTO":
-        d["actuator"].trigger(d["siren_s"])
-    elif level == "MEDIO":
-        d["actuator"].warn()
-
-
 def trigger_siren():
     """La sirena que suena cuando un administrador confirma una alerta (H6). Usa el mismo actuador que las demás alertas."""
     d = get_dispatcher()
@@ -545,22 +448,6 @@ def logout(request: Request):
 
 # ---------------------- API ----------------------
 
-@app.middleware("http")
-async def limitar_subidas(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/analyze":
-        # Se decide ANTES de recibir el video: sin sesión no se acepta ni un byte, y si es enorme tampoco.
-        try:
-            user = await asyncio.to_thread(auth.user_from_token, request.cookies.get(auth.SESSION_COOKIE))
-        except (psycopg2.OperationalError, psycopg2.pool.PoolError):
-            return JSONResponse(status_code=503,
-                                content={"error": "El servicio no está disponible. Inténtalo en unos minutos."})
-        if user is None:
-            return JSONResponse(status_code=401, content={"error": "No has iniciado sesión."})
-        if upload_too_big(request):
-            return JSONResponse(status_code=413,
-                                content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
-    return await call_next(request)
-
 
 @app.middleware("http")
 async def seguridad(request: Request, call_next):
@@ -577,9 +464,6 @@ async def seguridad(request: Request, call_next):
 @app.on_event("startup")
 def startup():
     log.warning("Backend GUARDIAN iniciado. Preparando actuador y notificador...")
-    restos = clean_leftovers()
-    if restos:
-        log.warning("Se borraron %d video(s) que quedaron a medias de un análisis anterior.", restos)
     db.dsn()   # si falta DATABASE_URL, el arranque se detiene con un mensaje claro
     try:
         db.check()
@@ -690,97 +574,6 @@ def pwa_icon(nombre: str):
 
 
 # ---------------------- CÁMARA EN VIVO ----------------------
-
-def _process_frame(session, data, user, camera_id):
-    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        return None
-    out = session.process(frame)
-    if out["event"]:
-        insert_event(out["event"], user=user, source_kind="browser", camera_id=camera_id)
-        dispatch_live_alert(out["event"], camera_id)
-    return out
-
-
-@app.websocket("/ws/live")
-async def ws_live(ws: WebSocket):
-    """El navegador manda frames JPEG (binario); responde JSON con cajas y nivel."""
-    await ws.accept()
-    if not auth.origin_allowed(ws):
-        await ws.close(code=4403)           # otro sitio intentó abrir la cámara
-        return
-    try:
-        user = await asyncio.to_thread(auth.user_from_websocket, ws)
-    except (psycopg2.OperationalError, psycopg2.pool.PoolError):
-        await ws.close(code=1013)           # base no disponible: intenta más tarde
-        return
-    if user is None:
-        await ws.close(code=4401)           # sin sesión o sesión vencida
-        return
-    try:
-        camera = await asyncio.to_thread(cameras.resolve_camera, user, ws.query_params.get("camera"))
-    except (psycopg2.OperationalError, psycopg2.pool.PoolError):
-        await ws.close(code=1013)
-        return
-    if camera is None:
-        await ws.close(code=4404)           # esa cámara no existe o no es del usuario
-        return
-    await asyncio.to_thread(cameras.touch_camera, camera["id"])
-    engine = await asyncio.to_thread(get_engine)
-    session = engine.new_session(EVIDENCE_DIR)
-    log.info("Cámara en vivo conectada (usuario %s, cámara %s).", user["id"], camera["id"])
-    try:
-        while True:
-            data = await ws.receive_bytes()
-            # La inferencia es bloqueante: se ejecuta en un hilo para no frenar el servidor.
-            out = await asyncio.to_thread(_process_frame, session, data, user, camera["id"])
-            if out is not None:
-                await ws.send_json(out)
-    except WebSocketDisconnect:
-        log.info("Cámara en vivo desconectada.")
-
-
-@app.post("/analyze")
-async def analyze(video: UploadFile = File(...), camera: str = Form(""), user: dict = Depends(auth.current_user)):
-    """
-    Analiza un video y guarda los EVENTOS encontrados. El video no se conserva: se copia a un
-    archivo temporal con nombre único (el motor lo abre por ruta), se analiza, y se borra siempre.
-    """
-    cam = await asyncio.to_thread(cameras.resolve_camera, user, camera)
-    if cam is None:
-        return JSONResponse(status_code=404, content={"error": "Esa cámara no existe o no es tuya."})
-    label = clean_filename(video.filename)
-    extension = os.path.splitext(label)[1].lower()
-    if extension not in VIDEO_EXTENSIONS:
-        return JSONResponse(status_code=415, content={"error": "Formato no permitido. Usa MP4, MOV, AVI, MKV o WEBM."})
-    fd, tmp_path = tempfile.mkstemp(prefix=TMP_PREFIX, suffix=extension, dir=UPLOAD_DIR)
-    try:
-        recibidos = 0
-        with os.fdopen(fd, "wb") as out:
-            while True:
-                trozo = await video.read(1024 * 1024)
-                if not trozo:
-                    break
-                recibidos += len(trozo)
-                if recibidos > MAX_UPLOAD_MB * 1024 * 1024:
-                    return JSONResponse(status_code=413,
-                                        content={"error": f"El archivo supera el máximo de {MAX_UPLOAD_MB} MB."})
-                out.write(trozo)
-        try:
-            events = get_engine().analyze_video(tmp_path, EVIDENCE_DIR, source_label=label)
-        except Exception:
-            log.exception("Falló el análisis del video %s", label)       # el detalle queda en el registro, no en la respuesta
-            return JSONResponse(status_code=500, content={"error": "No se pudo analizar el video. Prueba con otro archivo."})
-        peor = max(events, key=lambda ev: ev["score"]) if events else None
-        for e in events:       # un video avisa solo por su evento más grave, para no llenar el chat
-            insert_event(e, user=user, source_kind="video", camera_id=cam["id"], notify=e is peor)
-        await asyncio.to_thread(dispatch_alerts, events, label)
-        return {"archivo": label, "eventos_detectados": len(events), "eventos": events}
-    finally:
-        try:
-            os.remove(tmp_path)          # el video nunca se queda en el servidor
-        except OSError:
-            pass
 
 
 INGEST_MAX_JSON = 100_000                                           # evento sin foto
@@ -968,11 +761,11 @@ async def _assign(request: Request, source_id: str, user: dict, reassign: bool):
     aviso = resultado.pop("_aviso", None)
     if aviso and aviso["owner_id"] and aviso["owner_id"] != str(user["id"]):
         lugar = f" ({aviso['place']})" if aviso["place"] else ""
-        texto = f"VIGÍA: el administrador te asignó la cámara «{aviso['name']}»{lugar}. Ya aparece en tu lista de Cámaras."
+        texto = f"INTIVISION: el administrador te asignó la cámara «{aviso['name']}»{lugar}. Ya aparece en tu lista de Cámaras."
         threading.Thread(target=alerts.notify_user, args=(aviso["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     anterior = (aviso or {}).get("anterior")      # quien tenía la cámara antes: ya no la ve, así que se le dice (salvo que siga siendo suya)
     if anterior and anterior["owner_id"] and anterior["owner_id"] != str(user["id"]) and anterior["owner_id"] != aviso["owner_id"]:
-        texto = f"VIGÍA: la cámara «{anterior['name']}» ya no está asignada a ti. Quedó archivada y su historial se conserva."
+        texto = f"INTIVISION: la cámara «{anterior['name']}» ya no está asignada a ti. Quedó archivada y su historial se conserva."
         threading.Thread(target=alerts.notify_user, args=(anterior["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     return JSONResponse(status_code=201, content=resultado)
 
@@ -998,7 +791,7 @@ async def admin_unassign_source(source_id: str, request: Request, user: dict = D
         return JSONResponse(status_code=ex.status, content={"error": ex.message, "code": ex.code})
     aviso = resultado.pop("_aviso", None)
     if aviso and aviso["owner_id"] and aviso["owner_id"] != str(user["id"]):
-        texto = f"VIGÍA: el administrador quitó la asignación de tu cámara «{aviso['name']}». Quedó archivada y su historial se conserva."
+        texto = f"INTIVISION: el administrador quitó la asignación de tu cámara «{aviso['name']}». Quedó archivada y su historial se conserva."
         threading.Thread(target=alerts.notify_user, args=(aviso["owner_id"], texto), name="aviso-asignacion", daemon=True).start()
     return JSONResponse(content=resultado)
 
@@ -1282,13 +1075,10 @@ def cameras_page(request: Request, user: dict = Depends(auth.current_user)):
     return HTMLResponse(pwa.inject(pages.render_cameras(user, cameras.list_cameras(user)), request.state.csp_nonce))
 
 
-@app.post("/cameras", response_class=HTMLResponse)
-def cameras_create(name: str = Form(""), place: str = Form(""), user: dict = Depends(auth.current_user)):
-    cam, problema = cameras.create_camera(user, name, place)
-    if problema:
-        return HTMLResponse(pages.render_cameras(user, cameras.list_cameras(user), message=problema,
-                                                 values=(name[:200], place[:200])), status_code=400)
-    return RedirectResponse(f"/cameras/{cam['id']}", status_code=303)
+@app.get("/")
+def home(user: dict = Depends(auth.current_user)):
+    """La puerta de entrada: el administrador va al panel y el vecino a sus cámaras. Sin sesión, el manejador de errores lo lleva al inicio de sesión."""
+    return RedirectResponse("/admin" if user["role"] == "community_admin" else "/cameras", status_code=303)
 
 
 @app.get("/cameras/{camera_id}", response_class=HTMLResponse)
@@ -1372,42 +1162,3 @@ def alerts_test(user: dict = Depends(auth.current_user)):
     return RedirectResponse("/alerts?m=" + ("probado" if ok else motivo), status_code=303)
 
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request, user: dict = Depends(auth.current_user)):
-    rows = list_events(user, 50)
-    cards = ""
-    for r in rows:
-        partes = [r["camera_name"]] if r["camera_name"] else []
-        if user["role"] == "community_admin" and r["owner_name"]:
-            partes.append("de " + r["owner_name"])
-        extra = f'<div>{html.escape(" · ".join(partes))}</div>' if partes else ""
-        color = {"ALTO": "#e74c3c", "MEDIO": "#f39c12", "BAJO": "#2ecc71"}.get(r["level"], "#888")
-        img = (f'<img src="/evidence/{html.escape(r["image"])}" style="width:100%;border-radius:8px">'
-               if r["image"] else "")
-        vt = f'{r["video_time_s"]:g}s' if r["video_time_s"] is not None else "en vivo"
-        origen = SOURCE_LABELS.get(r["source"], r["source"])
-        cards += f"""
-        <div style="border:1px solid #ddd;border-radius:10px;padding:10px;background:#fff">
-          {img}
-          <div style="margin-top:8px">
-            <span style="background:{color};color:#fff;padding:2px 8px;border-radius:6px;font-weight:bold">{html.escape(r["level"])}</span>
-            <span style="color:#666"> puntaje {r["score"]}</span>
-          </div>
-          <div style="font-size:14px;margin-top:6px">{html.escape(r["reasons"] or "")}</div>
-          <div style="font-size:12px;color:#888;margin-top:6px">{html.escape(origen)} · {vt} · {r["created_at"]}</div>
-          {extra}
-        </div>"""
-    if not cards:
-        cards = '<p style="color:#888">Aun no hay eventos. Inicia la cámara para monitorear.</p>'
-    with open(os.path.join(TEMPLATES_DIR, "index.html"), encoding="utf-8") as fh:
-        template = fh.read()
-    rol = "Administrador" if user["role"] == "community_admin" else "Residente"
-    propias = cameras.usable_cameras(user)
-    if propias:
-        opciones = "".join(f'<option value="{pages.esc(c["id"])}">{pages.esc(c["name"])}</option>' for c in propias)
-    else:
-        opciones = f'<option value="">Se creará «Cámara de {pages.esc(user["full_name"])}» automáticamente</option>'
-    return HTMLResponse(
-        fill(template, usuario=f'{html.escape(user["full_name"])} · {rol}', cards=cards,
-             nonce=request.state.csp_nonce, camara_opciones=opciones, pendientes=pages.admin_links(user)),
-        headers={"Cache-Control": "no-store"})

@@ -144,7 +144,7 @@ def send_test(user):
     if not _allow("test", str(user["id"]), every=TEST_EVERY_S):
         return False, "espera"
     try:
-        _client.send_message(canal["chat_id"], "Mensaje de prueba de VIGÍA: si lo ves, las alertas llegarán a este chat.")
+        _client.send_message(canal["chat_id"], "Mensaje de prueba de INTIVISION: si lo ves, las alertas llegarán a este chat.")
     except telegram_api.TelegramError as ex:
         if ex.blocked:
             with db.cursor() as cur:
@@ -192,10 +192,10 @@ def _reply(chat_id, text):
 
 _REPLIES = {
     "ok": "Listo: tu cuenta quedó vinculada. Recibirás aquí las alertas de tus cámaras.",
-    "taken": "Este chat ya está vinculado a otra cuenta de VIGÍA.",
-    "invalid": "Ese enlace no es válido o ya venció. Genera uno nuevo en VIGÍA, en Alertas.",
+    "taken": "Este chat ya está vinculado a otra cuenta de INTIVISION.",
+    "invalid": "Ese enlace no es válido o ya venció. Genera uno nuevo en INTIVISION, en Alertas.",
 }
-_HELP = "Este bot solo envía alertas de VIGÍA. Para vincularlo, abre VIGÍA, entra a Alertas y usa Vincular Telegram."
+_HELP = "Este bot solo envía alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram."
 
 
 def handle_update(update):
@@ -207,7 +207,7 @@ def handle_update(update):
     if chat.get("id") is None:
         return
     if chat.get("type") != "private":
-        _reply(chat["id"], "VIGÍA solo se vincula desde un chat privado con el bot.")
+        _reply(chat["id"], "INTIVISION solo se vincula desde un chat privado con el bot.")
         return
     texto = (msg.get("text") or "").strip()
     if texto.split(maxsplit=1)[:1] == ["/start"]:

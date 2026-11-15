@@ -13,6 +13,8 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage create-camera \
       --community-slug cuadra-01 --name "Garaje" --kind private --owner correo@ejemplo.com
   docker compose exec backend python -m backend.manage list-cameras
+  docker compose exec backend python -m backend.manage archivar-camaras-navegador            (simulacro)
+  docker compose exec backend python -m backend.manage archivar-camaras-navegador --si       (archiva)
   docker compose exec backend python -m backend.manage demo-datos --community-slug cuadra-01 --eventos 300 --dias 30
   docker compose exec backend python -m backend.manage demo-borrar --community-slug cuadra-01
   docker compose exec -it backend python -m backend.manage set-password --user correo@ejemplo.com
@@ -24,16 +26,14 @@ pasar el nombre de una variable de entorno con --password-env.
 import argparse
 import datetime
 import getpass
-import json
 import os
 import random
 import secrets
 import sys
-import uuid
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, cameras, db  # noqa: E402
+from backend import auth, cameras, db, mapa  # noqa: E402
 
 
 def ask_password(args, *contexto):
@@ -210,6 +210,39 @@ def list_users(args):
         print("No hay usuarios.")
 
 
+# ---------------------------------------------------------------- cámaras del navegador (H11)
+
+def archivar_camaras_navegador(args):
+    """
+    Archiva las cámaras que creó el navegador (tipo «browser» o «file»): «Analizar» y la cámara del celular o la computadora ya no existen,
+    así que esas cámaras no sirven. NO se borra ningún evento. Sin --si es un simulacro: solo cuenta y muestra.
+    """
+    with db.cursor() as cur:
+        filtro, parametros = "", []
+        if args.community_slug:
+            filtro = " AND c.community_id = %s"
+            parametros.append(community_id(cur, args.community_slug))
+        cur.execute(f"""SELECT c.id::text AS id, c.name,
+                               (SELECT count(*) FROM events e WHERE e.camera_id = c.id) AS eventos
+                        FROM cameras c WHERE c.is_active AND c.source_type IN ('browser', 'file'){filtro} ORDER BY c.name""", parametros)
+        filas = cur.fetchall()
+        total_eventos = sum(int(f["eventos"]) for f in filas)
+        print(f"{len(filas)} cámara(s) activa(s) creadas por el navegador, con {total_eventos} evento(s) en total.")
+        for f in filas[:20]:
+            print(f"  - {f['name']} ({f['eventos']} evento(s))")
+        if len(filas) > 20:
+            print(f"  ... y {len(filas) - 20} más")
+        if not args.si:
+            print("SIMULACRO: no se cambió nada. Para archivarlas, ejecuta el mismo comando con --si.")
+            return
+        for f in filas:
+            cur.execute("""UPDATE cameras SET is_active = false,
+                                  name = left(name, 35) || ' (archivada ' || to_char(now(), 'YYYY-MM-DD') || ' ' || left(id::text, 8) || ')'
+                           WHERE id = %s""", (f["id"],))
+            mapa.limpiar_ubicacion(cur, f["id"])           # una cámara archivada pierde su ubicación
+    print(f"Listo: {len(filas)} cámara(s) archivada(s). Sus eventos se conservan.")
+
+
 # ---------------------------------------------------------------- datos de demostración (H8)
 # Los eventos de demostración llevan un edge_event_id con este comienzo fijo (la columna es un UUID, no admite texto libre), para
 # poder borrarlos sin tocar los reales. 20 caracteres fijos: no hay forma práctica de que un identificador real empiece así.
@@ -290,7 +323,7 @@ def demo_borrar(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Administración de VIGÍA")
+    ap = argparse.ArgumentParser(description="Administración de INTIVISION")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("create-community")
@@ -335,6 +368,11 @@ def main():
     p = sub.add_parser("list-cameras")
     p.add_argument("--community-slug")
     p.set_defaults(fn=list_cameras)
+
+    p = sub.add_parser("archivar-camaras-navegador", help="archiva las cámaras que creó el navegador (por defecto solo cuenta; con --si las archiva)")
+    p.add_argument("--community-slug")
+    p.add_argument("--si", action="store_true", help="aplicar de verdad; sin esto es un simulacro")
+    p.set_defaults(fn=archivar_camaras_navegador)
 
     p = sub.add_parser("demo-datos", help="siembra eventos falsos de demostración para ensayar el panel")
     p.add_argument("--community-slug", required=True)

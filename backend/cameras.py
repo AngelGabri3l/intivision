@@ -95,71 +95,7 @@ def get_camera(user, camera_id):
     return dict(row) if row else None
 
 
-def usable_cameras(user):
-    """Las cámaras con las que este usuario puede transmitir o subir videos: las suyas, activas."""
-    with db.cursor() as cur:
-        cur.execute("""SELECT id::text AS id, name FROM cameras
-                       WHERE user_id = %s AND kind = 'private' AND is_active ORDER BY created_at""", (user["id"],))
-        return [dict(r) for r in cur.fetchall()]
-
-
 # ------------------------------------------------------------------ crear y usar
-
-def create_camera(user, name, place):
-    """(cámara, None) si se creó; (None, motivo) si no."""
-    name, place = clean_text(name), clean_text(place)
-    problema = name_issue(name) or place_issue(place)
-    if problema:
-        return None, problema
-    with db.cursor() as cur:
-        cur.execute("SELECT count(*) AS n FROM cameras WHERE user_id = %s", (user["id"],))
-        if cur.fetchone()["n"] >= MAX_CAMERAS_PER_USER:
-            return None, f"Llegaste al máximo de {MAX_CAMERAS_PER_USER} cámaras."
-        cur.execute("""INSERT INTO cameras (community_id, user_id, kind, name, place, source_type, admin_can_view)
-                       VALUES (%s, %s, 'private', %s, %s, 'browser', true)
-                       ON CONFLICT (community_id, name) DO NOTHING RETURNING id::text AS id, name""",
-                    (user["community_id"], user["id"], name, place or None))
-        row = cur.fetchone()
-    if row is None:
-        return None, "Ya existe una cámara con ese nombre en tu comunidad. Elige otro."
-    return dict(row), None
-
-
-def default_camera(user):
-    """La primera cámara del usuario; si no tiene ninguna, se le crea «Cámara de <nombre>»."""
-    with db.cursor() as cur:
-        cur.execute("""SELECT id::text AS id, name FROM cameras
-                       WHERE user_id = %s AND kind = 'private' AND is_active ORDER BY created_at LIMIT 1""", (user["id"],))
-        row = cur.fetchone()
-        if row:
-            return dict(row)
-        base = clean_text("Cámara de " + user["full_name"])[:NAME_MAX]
-        for n in range(1, 100):
-            nombre = base if n == 1 else f"{base[:NAME_MAX - 4]} {n}"
-            cur.execute("""INSERT INTO cameras (community_id, user_id, kind, name, source_type, admin_can_view)
-                           VALUES (%s, %s, 'private', %s, 'browser', true)
-                           ON CONFLICT (community_id, name) DO NOTHING RETURNING id::text AS id, name""",
-                        (user["community_id"], user["id"], nombre))
-            row = cur.fetchone()
-            if row:
-                return dict(row)
-    raise RuntimeError("No se pudo crear la cámara predeterminada.")
-
-
-def resolve_camera(user, camera_id):
-    """
-    La cámara con la que se va a transmitir o subir un video. Sin indicar ninguna, la predeterminada.
-    Solo vale una cámara propia y activa; cualquier otra (ajena, inexistente, mal escrita) devuelve None.
-    """
-    if camera_id is None or camera_id == "":
-        return default_camera(user)
-    if not is_uuid(camera_id):
-        return None
-    with db.cursor() as cur:
-        cur.execute("""SELECT id::text AS id, name FROM cameras
-                       WHERE id = %s AND user_id = %s AND kind = 'private' AND is_active""", (camera_id, user["id"]))
-        row = cur.fetchone()
-    return dict(row) if row else None
 
 
 def edge_camera(edge, camera_id):
@@ -172,12 +108,6 @@ def edge_camera(edge, camera_id):
                     (camera_id, edge["community_id"], edge["id"]))
         row = cur.fetchone()
     return dict(row) if row else None
-
-
-def touch_camera(camera_id):
-    """Marca que la cámara acaba de dar señal."""
-    with db.cursor() as cur:
-        cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
 
 
 def set_admin_visibility(user, camera_id, visible):

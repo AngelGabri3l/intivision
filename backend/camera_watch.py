@@ -51,20 +51,20 @@ def _minutes(camera):
 def offline_text(cams):
     pie = "Revisa que la mini PC esté encendida y con internet."
     if len(cams) == 1:
-        return f"⚠️ VIGÍA: la cámara «{cams[0]['name']}» dejó de dar señal hace {_minutes(cams[0])} min. {pie}"
+        return f"⚠️ INTIVISION: la cámara «{cams[0]['name']}» dejó de dar señal hace {_minutes(cams[0])} min. {pie}"
     lineas = [f"• {c['name']} (hace {_minutes(c)} min)" for c in cams[:MAX_LISTED]]
     if len(cams) > MAX_LISTED:
         lineas.append(f"• …y {len(cams) - MAX_LISTED} más")
-    return f"⚠️ VIGÍA: {len(cams)} cámaras dejaron de dar señal:\n" + "\n".join(lineas) + f"\n{pie}"
+    return f"⚠️ INTIVISION: {len(cams)} cámaras dejaron de dar señal:\n" + "\n".join(lineas) + f"\n{pie}"
 
 
 def recovered_text(cams):
     if len(cams) == 1:
-        return f"✅ VIGÍA: la cámara «{cams[0]['name']}» volvió a dar señal."
+        return f"✅ INTIVISION: la cámara «{cams[0]['name']}» volvió a dar señal."
     lineas = [f"• {c['name']}" for c in cams[:MAX_LISTED]]
     if len(cams) > MAX_LISTED:
         lineas.append(f"• …y {len(cams) - MAX_LISTED} más")
-    return f"✅ VIGÍA: {len(cams)} cámaras volvieron a dar señal:\n" + "\n".join(lineas)
+    return f"✅ INTIVISION: {len(cams)} cámaras volvieron a dar señal:\n" + "\n".join(lineas)
 
 
 def _recipients(cur, camera):
