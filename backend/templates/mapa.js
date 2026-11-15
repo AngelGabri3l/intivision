@@ -151,7 +151,7 @@
     enviar("/admin/camaras/" + encodeURIComponent(cam.id) + "/ubicacion", { lat: lat, lng: lng, precision_m: precision, confirmar_lejos: !!confirmar })
       .then(function (x) {
         ocupado = false;
-        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.status === 401) { window.location.href = "/"; return; }
         if (x.r.ok) {
           desarmar();
           estado("Ubicación guardada para " + cam.name + ".");
@@ -171,7 +171,7 @@
   function quitarUbicacion(cam) {
     enviar("/admin/camaras/" + encodeURIComponent(cam.id) + "/ubicacion/quitar", {})
       .then(function (x) {
-        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.status === 401) { window.location.href = "/"; return; }
         if (x.r.ok) { estado("Se quitó la ubicación de " + cam.name + "."); if (mapa) { mapa.closePopup(); } cargar(); }
         else { estado(x.d && x.d.error ? x.d.error : "No se pudo quitar la ubicación.", true); }
       })
@@ -235,7 +235,7 @@
       .then(respuesta)
       .then(function (x) {
         if (mia !== secuencia) { return; }
-        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.status === 401) { window.location.href = "/"; return; }
         if (x.r.status === 403) { estado("Esta pantalla es solo para administradores.", true); return; }
         if (!x.r.ok) { estado(x.d && x.d.error ? x.d.error : "No se pudo cargar el mapa.", true); return; }
         try { render(x.d); }

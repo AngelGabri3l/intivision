@@ -1155,23 +1155,24 @@ ALERT_NOTICES = {
 }
 
 
-def _alerts_response(user, notice=None, link=None, status=200):
-    return HTMLResponse(pages.render_alerts(user, alerts.get_channel(user["id"]), alerts.available(),
-                                            alerts.recent_deliveries(user["id"]), notice=notice, link=link),
+def _alerts_response(request, user, notice=None, link=None, status=200):
+    return HTMLResponse(pwa.inject_sesion(pages.render_alerts(user, alerts.get_channel(user["id"]), alerts.available(),
+                                                              alerts.recent_deliveries(user["id"]), notice=notice, link=link),
+                                          request.state.csp_nonce),
                         status_code=status)
 
 
 @app.get("/alerts", response_class=HTMLResponse)
-def alerts_page(m: str = "", user: dict = Depends(auth.current_user)):
-    return _alerts_response(user, notice=ALERT_NOTICES.get(m))
+def alerts_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    return _alerts_response(request, user, notice=ALERT_NOTICES.get(m))
 
 
 @app.post("/alerts/link", response_class=HTMLResponse)
-def alerts_link(user: dict = Depends(auth.current_user)):
+def alerts_link(request: Request, user: dict = Depends(auth.current_user)):
     link, problema = alerts.create_link(user)
     if problema:
-        return _alerts_response(user, notice=("error", problema), status=429 if "demasiados" in problema else 503)
-    return _alerts_response(user, link=link)
+        return _alerts_response(request, user, notice=("error", problema), status=429 if "demasiados" in problema else 503)
+    return _alerts_response(request, user, link=link)
 
 
 @app.post("/alerts/unlink")
@@ -1181,11 +1182,11 @@ def alerts_unlink(user: dict = Depends(auth.current_user)):
 
 
 @app.post("/alerts/settings")
-def alerts_settings(min_level: str = Form("MEDIO"), active: str = Form(""), user: dict = Depends(auth.current_user)):
+def alerts_settings(request: Request, min_level: str = Form("MEDIO"), active: str = Form(""), user: dict = Depends(auth.current_user)):
     if min_level not in alerts.LEVELS:
-        return _alerts_response(user, notice=("error", "Nivel no válido."), status=400)
+        return _alerts_response(request, user, notice=("error", "Nivel no válido."), status=400)
     if not alerts.set_preferences(user["id"], min_level, active == "1"):
-        return _alerts_response(user, notice=ALERT_NOTICES["no_vinculado"], status=400)
+        return _alerts_response(request, user, notice=ALERT_NOTICES["no_vinculado"], status=400)
     return RedirectResponse("/alerts?m=guardado", status_code=303)
 
 

@@ -282,7 +282,7 @@
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { return { r: r, d: d }; }); })
       .then(function (x) {
         aplicando = false;
-        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.status === 401) { window.location.href = "/"; return; }
         if (x.r.ok) {
           avisoHorario = { texto: "Listo: el horario sensible ahora es de " + hh(x.d.inicio) + " a " + hh(x.d.fin) + ". Las mini PC lo reciben en su siguiente latido.", error: false };
         } else {
@@ -493,7 +493,7 @@
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { return { r: r, d: d }; }); })
       .then(function (x) {
         if (mia !== secuencia) { return; }
-        if (x.r.status === 401) { window.location.href = "/login"; return; }
+        if (x.r.status === 401) { window.location.href = "/"; return; }
         if (x.r.status === 403) { estado("Esta pantalla es solo para administradores.", true); return; }
         if (!x.r.ok) { estado(x.d && x.d.error ? x.d.error : "No se pudo cargar el panel.", true); return; }
         render(x.d);

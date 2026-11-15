@@ -39,7 +39,7 @@
     var m = Math.floor(s / 60), r = Math.floor(s % 60);
     return m + ":" + (r < 10 ? "0" : "") + r;
   }
-  function irAlInicio() { window.location.assign("/login"); }
+  function irAlInicio() { window.location.assign("/"); }
 
   function mostrarVacio(si) {
     if (si && listo) {

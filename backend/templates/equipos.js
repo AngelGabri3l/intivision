@@ -30,7 +30,7 @@
     estado.textContent = texto || "";
     mensajeDeLista = !!deLista;
   }
-  function irAlInicio() { window.location.assign("/login"); }
+  function irAlInicio() { window.location.assign("/"); }
   function hace(seg) {
     seg = Math.max(0, Math.floor(Number(seg) || 0));
     if (seg < 60) { return seg + " s"; }

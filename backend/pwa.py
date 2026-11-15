@@ -9,6 +9,7 @@ PWA (H7): lo que permite instalar INTIVISION en el celular como una aplicación.
 from __future__ import annotations
 
 import functools
+import os
 
 import cv2
 import numpy as np
@@ -99,10 +100,24 @@ HEAD_TAGS = (
 )
 
 
+SESION_JS = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "sesion.js"), encoding="utf-8").read()
+
+
+def _script_sesion(nonce: str) -> str:
+    return '<script nonce="' + nonce + '">' + SESION_JS + "</script>"
+
+
+def inject_sesion(pagina: str, nonce: str) -> str:
+    """Le agrega a una página con sesión el aviso de actividad de la persona (ver templates/sesion.js)."""
+    script = _script_sesion(nonce)
+    i = pagina.rfind("</body>")
+    return pagina[:i] + script + pagina[i:] if i != -1 else pagina + script
+
+
 def inject(pagina: str, nonce: str) -> str:
-    """Le agrega a una página las etiquetas de la PWA y el registro del service worker (con la clave de un solo uso de la página)."""
+    """Le agrega a una página las etiquetas de la PWA, el registro del service worker y el aviso de actividad (con la clave de un solo uso de la página)."""
     registro = ('<script nonce="' + nonce + '">if ("serviceWorker" in navigator) { window.addEventListener("load", function () '
-                '{ navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {}); }); }</script>')
+                '{ navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {}); }); }</script>') + _script_sesion(nonce)
     if "</head>" in pagina:
         pagina = pagina.replace("</head>", HEAD_TAGS + "</head>", 1)
     i = pagina.rfind("</body>")
