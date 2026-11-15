@@ -9,7 +9,7 @@ import os
 import re
 from urllib.parse import urlencode
 
-from backend import alerts, cameras, hitl
+from backend import alerts, auth, cameras, hitl
 
 log = logging.getLogger("pages")
 
@@ -378,6 +378,25 @@ def _linked_panel(channel) -> str:
             f'<p class="zona__ayuda">Desvincular detiene los avisos nuevos; los mensajes que ya llegaron siguen en tu Telegram.</p>')
 
 
+def duration_text(segundos) -> str:
+    """'30 minutos', '12 horas', '7 días': la duración con la unidad que se lee mejor."""
+    for unidad, tam, singular, plural in (("d", 86400, "día", "días"), ("h", 3600, "hora", "horas"), ("m", 60, "minuto", "minutos")):
+        if segundos >= tam and (segundos / tam) == int(segundos / tam):
+            n = int(segundos / tam)
+            return f"{n} {singular if n == 1 else plural}"
+    n = max(1, round(segundos / 60))
+    return f"{n} {'minuto' if n == 1 else 'minutos'}"
+
+
+def security_block(user) -> str:
+    """La política de sesión de su rol, dicha en simple, y el botón para cerrar la sesión en todos sus dispositivos."""
+    idle, maximo = auth.session_policy(user["role"])
+    return ('<p class="analisis__descripcion">'
+            f'Tu sesión se cierra sola después de {duration_text(idle)} sin actividad y, en todo caso, a los {duration_text(maximo)} de haber entrado. '
+            'Si perdiste un celular o usaste una computadora ajena, ciérrala en todos tus dispositivos.</p>'
+            '<form method="post" action="/logout/todos"><button class="btn" type="submit">Cerrar sesión en todos mis dispositivos</button></form>')
+
+
 def render_alerts(user, channel, configured, recent, notice=None, link=None) -> str:
     if not configured:
         panel = alert_block("Telegram no está configurado en este servidor: falta definir TELEGRAM_TOKEN.", "alerta")
@@ -408,5 +427,5 @@ def render_alerts(user, channel, configured, recent, notice=None, link=None) -> 
         nav=nav(user, "alertas"),
         descripcion=("Vincula tu Telegram para recibir en tu celular la foto y los datos de cada alerta. "
                      "Elige desde qué nivel quieres que te avisemos."),
-        aviso=alert_block(notice[1], notice[0]) if notice else "", panel=panel,
+        aviso=alert_block(notice[1], notice[0]) if notice else "", panel=panel, seguridad=security_block(user),
         total=esc(count_text(len(recent), "aviso", "avisos")) if recent else "", avisos=avisos)

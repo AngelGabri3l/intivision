@@ -10,6 +10,8 @@ auth.py — Inicio de sesión, sesiones por cookie y roles (VIGIA-23).
 import collections
 import hashlib
 import ipaddress
+import logging
+import math
 import os
 import re
 import secrets
@@ -23,8 +25,40 @@ from fastapi import Depends, Request, WebSocket
 
 from backend import db
 
+log = logging.getLogger("backend")
 SESSION_COOKIE = "vigia_session"
-SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))
+
+
+def _entorno_positivo(nombre, por_defecto):
+    """Un número mayor que 0 del entorno. Si no lo es, el servidor no arranca: una política de sesión mal escrita no debe pasar en silencio."""
+    crudo = os.environ.get(nombre, "").strip()
+    if not crudo:
+        return float(por_defecto)
+    try:
+        valor = float(crudo)
+    except ValueError:
+        valor = float("nan")
+    if not (math.isfinite(valor) and valor > 0):
+        raise ValueError(f"{nombre} debe ser un número mayor que 0 (recibió «{crudo}»).")
+    return valor
+
+
+# Cuánto dura una sesión según el rol: se cierra sola tras un rato sin actividad y, pase lo que pase, al llegar a la duración máxima.
+SESSION_IDLE_MIN_ADMIN = _entorno_positivo("SESSION_IDLE_MIN_ADMIN", 30)         # administrador: minutos sin actividad
+SESSION_MAX_H_ADMIN = _entorno_positivo("SESSION_MAX_H_ADMIN", 8)                # administrador: horas como máximo
+SESSION_IDLE_H_RESIDENT = _entorno_positivo("SESSION_IDLE_H_RESIDENT", 12)       # vecino: horas sin actividad
+SESSION_MAX_DAYS_RESIDENT = _entorno_positivo("SESSION_MAX_DAYS_RESIDENT", 7)    # vecino: días como máximo
+
+
+def session_policy(role):
+    """(inactividad, duración máxima) en segundos para ese rol. La inactividad nunca pasa de la duración máxima."""
+    if role == "community_admin":
+        idle, maximo = SESSION_IDLE_MIN_ADMIN * 60, SESSION_MAX_H_ADMIN * 3600
+    else:
+        idle, maximo = SESSION_IDLE_H_RESIDENT * 3600, SESSION_MAX_DAYS_RESIDENT * 86400
+    return min(idle, maximo), maximo
+
+
 MAX_FAILED_ATTEMPTS = int(os.environ.get("MAX_FAILED_ATTEMPTS", "5"))
 LOCK_MINUTES = int(os.environ.get("LOCK_MINUTES", "15"))
 MAX_PASSWORD_BYTES = 72          # límite de bcrypt
@@ -37,7 +71,11 @@ ROLES = ("resident", "community_admin")
 
 
 class NotAuthenticated(Exception):
-    """No hay sesión válida."""
+    """No hay sesión válida. `motivo` dice por qué, si había cookie: 'expirada' (venció o pasó su máximo) o 'cerrada' (se revocó)."""
+
+    def __init__(self, motivo=None):
+        super().__init__(motivo)
+        self.motivo = motivo
 
 
 class Forbidden(Exception):
@@ -136,14 +174,19 @@ def _clean_ip(ip: Optional[str]) -> Optional[str]:
         return None
 
 
-def create_session(user_id, ip: Optional[str] = None, user_agent: Optional[str] = None) -> str:
+def create_session(user_id, ip: Optional[str] = None, user_agent: Optional[str] = None, role: Optional[str] = None) -> str:
+    """Abre una sesión. Vale lo que dice la política de su rol; cada actividad de la persona la renueva (ver renew_session)."""
     token = secrets.token_urlsafe(32)
     with db.cursor() as cur:
+        if role is None:
+            cur.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+            role = cur.fetchone()["role"]
+        idle, _ = session_policy(role)
         cur.execute("DELETE FROM sessions WHERE expires_at < now() - interval '7 days'")
         cur.execute(
             """INSERT INTO sessions (user_id, token_hash, expires_at, ip, user_agent)
-               VALUES (%s, %s, now() + make_interval(hours => %s), %s, %s)""",
-            (user_id, _token_hash(token), SESSION_HOURS, _clean_ip(ip),
+               VALUES (%s, %s, now() + make_interval(secs => %s), %s, %s)""",
+            (user_id, _token_hash(token), idle, _clean_ip(ip),
              (user_agent or "")[:300] or None))
     return token
 
@@ -153,13 +196,54 @@ def user_from_token(token: Optional[str]) -> Optional[dict]:
         return None
     with db.cursor() as cur:
         cur.execute(
-            """SELECT u.id, u.community_id, u.role, u.full_name
+            """SELECT u.id, u.community_id, u.role, u.full_name, s.created_at, now() AS ahora
                FROM sessions s JOIN users u ON u.id = s.user_id
                WHERE s.token_hash = %s AND s.revoked_at IS NULL
                  AND s.expires_at > now() AND u.status = 'active'""",
             (_token_hash(token),))
         row = cur.fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    _, maximo = session_policy(row["role"])
+    if (row["ahora"] - row["created_at"]).total_seconds() >= maximo:
+        return None                      # pasó la duración máxima de su rol, aunque siga activa
+    return {k: row[k] for k in ("id", "community_id", "role", "full_name")}
+
+
+def renew_session(token: Optional[str], role: str):
+    """
+    Renueva la inactividad de una sesión: vale otra vez `inactividad` desde ahora, sin pasar nunca de su duración máxima. Escribe solo si
+    el vencimiento cambia más que un umbral (como mucho una vez por minuto por sesión); así también acota, en su siguiente pedido, las
+    sesiones abiertas con una política anterior.
+    """
+    if not token:
+        return
+    idle, maximo = session_policy(role)
+    umbral = min(60.0, idle / 4)
+    with db.cursor() as cur:
+        cur.execute(
+            """UPDATE sessions SET expires_at = LEAST(created_at + make_interval(secs => %(maximo)s), now() + make_interval(secs => %(idle)s))
+               WHERE token_hash = %(h)s AND revoked_at IS NULL AND expires_at > now()
+                 AND abs(extract(epoch FROM (expires_at - LEAST(created_at + make_interval(secs => %(maximo)s),
+                                                                now() + make_interval(secs => %(idle)s))))) > %(umbral)s""",
+            {"maximo": maximo, "idle": idle, "h": _token_hash(token), "umbral": umbral})
+
+
+def session_end_reason(token: Optional[str]) -> Optional[str]:
+    """Por qué ya no sirve la sesión de esta cookie: 'cerrada' (se revocó) o 'expirada' (venció, pasó su máximo o ya no existe)."""
+    if not token:
+        return None
+    with db.cursor() as cur:
+        cur.execute("SELECT revoked_at IS NOT NULL AS cerrada FROM sessions WHERE token_hash = %s", (_token_hash(token),))
+        row = cur.fetchone()
+    return "cerrada" if row and row["cerrada"] else "expirada"
+
+
+def revoke_all_sessions(user_id) -> int:
+    """Cierra todas las sesiones abiertas de una persona. Devuelve cuántas eran."""
+    with db.cursor() as cur:
+        cur.execute("UPDATE sessions SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL AND expires_at > now()", (user_id,))
+        return cur.rowcount
 
 
 def revoke_session(token: Optional[str]):
@@ -171,11 +255,28 @@ def revoke_session(token: Optional[str]):
 
 # ------------------------------------------------------------------ dependencias de FastAPI
 
+def cuenta_como_actividad(request: Request) -> bool:
+    """
+    Qué pedidos renuevan la inactividad: cargar una página y cualquier acción de la persona (POST, PUT, PATCH, DELETE).
+    NO la renuevan las consultas de datos que una pantalla hace sola cada pocos segundos, ni las imágenes, ni el WebSocket:
+    si lo hicieran, una pestaña olvidada abierta mantendría la sesión viva para siempre.
+    """
+    if request.method == "GET":
+        return "text/html" in request.headers.get("accept", "")
+    return request.method in ("POST", "PUT", "PATCH", "DELETE")
+
+
 def current_user(request: Request) -> dict:
-    """El usuario de la sesión. Si no hay sesión válida, lanza NotAuthenticated."""
-    user = user_from_token(request.cookies.get(SESSION_COOKIE))
+    """El usuario de la sesión. Si no hay sesión válida, lanza NotAuthenticated (con el motivo, si la cookie existía)."""
+    token = request.cookies.get(SESSION_COOKIE)
+    user = user_from_token(token)
     if user is None:
-        raise NotAuthenticated()
+        raise NotAuthenticated(session_end_reason(token))
+    if cuenta_como_actividad(request):
+        try:
+            renew_session(token, user["role"])
+        except Exception:
+            log.warning("No se pudo renovar la sesión (la petición sigue).", exc_info=True)
     return user
 
 
@@ -204,8 +305,9 @@ def cookie_is_secure(request: Request) -> bool:
             or request.headers.get("x-forwarded-proto", "").lower() == "https")
 
 
-def set_session_cookie(response, request: Request, token: str):
-    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_HOURS * 3600, httponly=True,
+def set_session_cookie(response, request: Request, token: str, role: str):
+    """La cookie dura lo máximo que puede durar la sesión de ese rol; la inactividad la controla el servidor."""
+    response.set_cookie(SESSION_COOKIE, token, max_age=int(session_policy(role)[1]), httponly=True,
                         secure=cookie_is_secure(request), samesite="lax", path="/")
 
 

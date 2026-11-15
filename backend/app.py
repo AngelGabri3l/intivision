@@ -377,9 +377,13 @@ async def _no_autenticado(request: Request, exc):
     # La página principal lleva al login; la API responde 401 (la página lo interpreta).
     pagina = request.url.path in ("/", "/admin") or request.url.path.startswith(("/cameras", "/alerts", "/admin/pendientes", "/admin/equipos", "/admin/mapa"))
     quiere_html = request.method == "GET" and pagina and "text/html" in request.headers.get("accept", "")
+    motivo = exc.motivo if getattr(exc, "motivo", None) in LOGIN_NOTICES else None
     if quiere_html:
-        return RedirectResponse("/login", status_code=303)
-    return JSONResponse(status_code=401, content={"error": "No has iniciado sesión."})
+        respuesta = RedirectResponse(f"/login?m={motivo}" if motivo else "/login", status_code=303)
+        if motivo:
+            respuesta.delete_cookie(auth.SESSION_COOKIE, path="/")        # la cookie ya no sirve: no se queda dando vueltas
+        return respuesta
+    return JSONResponse(status_code=401, content={"error": "No has iniciado sesión.", **({"motivo": motivo} if motivo else {})})
 
 
 @app.exception_handler(auth.Forbidden)
@@ -394,7 +398,7 @@ def render_login(message=None, status_code=200, tipo="error", identifier=""):
         template = fh.read()
     bloque = ""
     if message:
-        etiqueta = "Aviso" if tipo == "alerta" else "Error"
+        etiqueta = {"alerta": "Aviso", "ok": "Listo"}.get(tipo, "Error")
         bloque = (f'<p class="estado" data-tipo="{tipo}" role="alert"><span class="estado__tag">{etiqueta}</span>'
                   f'<span>{html.escape(message)}</span></p>')
     # Lo que escribió el usuario se devuelve escapado y sin caracteres de control.
@@ -403,15 +407,24 @@ def render_login(message=None, status_code=200, tipo="error", identifier=""):
                         status_code=status_code, headers={"Cache-Control": "no-store"})
 
 
+# Los únicos mensajes que `/login?m=...` puede mostrar: texto fijo del servidor, nunca lo que venga en la dirección.
+LOGIN_NOTICES = {
+    "expirada": ("Tu sesión terminó por inactividad. Inicia sesión de nuevo.", "alerta"),
+    "cerrada": ("Tu sesión se cerró desde otro dispositivo. Inicia sesión de nuevo.", "alerta"),
+    "todas": ("Cerraste sesión en todos tus dispositivos.", "ok"),
+}
+
+
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
+def login_page(request: Request, m: str = ""):
     try:
         ya_inicio = auth.user_from_token(request.cookies.get(auth.SESSION_COOKIE))
     except psycopg2.OperationalError:
         ya_inicio = None        # sin base no se puede comprobar; igual se muestra el formulario
     if ya_inicio:
         return RedirectResponse("/", status_code=303)
-    return render_login()
+    aviso = LOGIN_NOTICES.get(m)
+    return render_login(aviso[0], 200, aviso[1]) if aviso else render_login()
 
 
 @app.post("/login")
@@ -431,10 +444,30 @@ def login_submit(request: Request, identifier: str = Form(""), password: str = F
         # puede averiguar qué cuentas existen probando nombres.
         log.warning("Acceso fallido desde %s (%s).", ip, "cuenta bloqueada" if motivo == "locked" else "credenciales")
         return render_login(MENSAJE_ACCESO, 401, "error", identifier)
-    token = auth.create_session(user["id"], ip, request.headers.get("user-agent"))
+    token = auth.create_session(user["id"], ip, request.headers.get("user-agent"), role=user["role"])
     log.info("Inicio de sesión de %s desde %s.", user["id"], ip)
     response = RedirectResponse("/", status_code=303)
-    auth.set_session_cookie(response, request, token)
+    auth.set_session_cookie(response, request, token, user["role"])
+    return response
+
+
+@app.post("/session/ping")
+def session_ping(user: dict = Depends(auth.current_user)):
+    """El navegador avisa que la persona sigue ahí (clic, tecla, toque): ser un POST es lo que renueva su inactividad."""
+    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/logout/todos")
+def logout_all(request: Request, user: dict = Depends(auth.current_user)):
+    """Cierra la sesión de la persona en todos sus dispositivos (también en este). Queda en audit_log, solo con cuántas eran."""
+    cerradas = auth.revoke_all_sessions(user["id"])
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id, ip, meta)
+                       VALUES ('user', %s, %s, %s, 'logout_all', 'user', %s, %s, %s::jsonb)""",
+                    (user["id"], user["community_id"], user["id"], str(user["id"]), auth._clean_ip(auth.client_ip(request)),
+                     json.dumps({"sesiones": cerradas})))
+    response = RedirectResponse("/login?m=todas", status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
 
 
