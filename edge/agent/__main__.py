@@ -34,6 +34,7 @@ from .enviador import Enviador
 from .evidencia import imagen_de_prueba
 from .inventory import Inventario, Vigilante, sondear_una_vez
 from .latido import Latido
+from .recursos import MuestreadorRecursos
 from .relevo import Relevo, probar_relevo
 from .simulador import SimuladorEventos, evento_de_prueba
 from .sources import construir_descubridores
@@ -455,7 +456,7 @@ def cmd_vigilar(args, cfg) -> int:
     # Con servidor, el administrador decide qué cámaras se leen; sin servidor, las de agent.yaml (como en H1).
     gestor = GestorCaptura(inv, [] if cliente else cfg.assigned, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
     simbolo = {"aparecio": "+ apareció", "desaparecio": "- desapareció", "reaparecio": "+ volvió", "cambio": "~ cambió"}
-    cola = remota = latido = enviador = simulador = analizador = relevo = None
+    cola = remota = latido = enviador = simulador = analizador = relevo = recursos = None
     if cliente:
         cola = ColaLocal(cfg.data_dir, int(cfg.queue_max_mb * 1e6), cfg.queue_max_age_h * 3600)
 
@@ -464,7 +465,8 @@ def cmd_vigilar(args, cfg) -> int:
             gestor.sincronizar()
 
         remota = ConfigRemota(os.path.join(cfg.data_dir, "config_cache.json"), al_cambiar=aplicar_config)
-        latido = Latido(cliente, inv, remota, cola, cada_s=cfg.heartbeat_seconds)
+        recursos = MuestreadorRecursos()
+        latido = Latido(cliente, inv, remota, cola, cada_s=cfg.heartbeat_seconds, recursos=recursos)
         enviador = Enviador(cola, cliente, al_perder_camara=latido.despertar)
         if args.simular_eventos:
             simulador = SimuladorEventos(cola, remota, gestor, enviador, args.simular_eventos, args.nivel_simulado)
@@ -497,7 +499,7 @@ def cmd_vigilar(args, cfg) -> int:
     else:
         print(f"agente {__version__} vigilando SIN servidor (modo local); asignadas: {cfg.assigned or 'ninguna'}", flush=True)
     vigilante.start()
-    for hilo in (enviador, latido, simulador, analizador, relevo):
+    for hilo in (enviador, latido, simulador, analizador, relevo, recursos):
         if hilo:
             hilo.start()
     inicio = time.monotonic()
@@ -523,14 +525,17 @@ def cmd_vigilar(args, cfg) -> int:
                 print(f"[{_hora()}] servidor: cola {q['pendientes']}, enviados {en['enviados']}, fallos seguidos {en['fallos_seguidos']}, "
                       f"configuración {remota.version or 'sin recibir'} ({remota.origen or '-'})"
                       + (f", descartados {q['descartados']}" if q["descartados"] else ""), flush=True)
+            r = recursos.resumen() if recursos else None
+            if r:
+                print(f"[{_hora()}] equipo: CPU {r['cpu_avg']:g} % (pico {r['cpu_peak']:g} %), memoria {r['mem_used_mb']}/{r['mem_total_mb']} MB", flush=True)
             if args.segundos and time.monotonic() - inicio >= args.segundos:
                 break
     finally:
         vigilante.detener()
-        for hilo in (relevo, analizador, simulador, latido, enviador):
+        for hilo in (recursos, relevo, analizador, simulador, latido, enviador):
             if hilo:
                 hilo.detener()
-        for hilo in (relevo, analizador, simulador, latido, enviador):
+        for hilo in (recursos, relevo, analizador, simulador, latido, enviador):
             if hilo and hilo.is_alive():
                 hilo.join(timeout=5)
         gestor.detener_todo()

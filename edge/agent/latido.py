@@ -22,9 +22,10 @@ AVISO_CADA_S = 300
 
 class Latido(threading.Thread):
     def __init__(self, cliente: ClienteServidor, inventario: Inventario, config: ConfigRemota, cola=None,
-                 cada_s: float = 30.0, espera_error_s: float = 10.0):
+                 cada_s: float = 30.0, espera_error_s: float = 10.0, recursos=None):
         super().__init__(name="latido", daemon=True)
         self.cliente, self.inventario, self.config, self.cola = cliente, inventario, config, cola
+        self.recursos = recursos                 # el muestreador de CPU y memoria (H13), o None
         self.cada_s, self.espera_error_s = cada_s, espera_error_s
         self._parar, self._despertar = threading.Event(), threading.Event()
         self.ultimo_ok: float | None = None
@@ -60,6 +61,14 @@ class Latido(threading.Thread):
         if self.cola is not None:
             e = self.cola.estadisticas()
             instantanea["queue"] = {"pending": e["pendientes"], "oldest_age_s": e["mas_viejo_s"], "dropped": e["descartados"]}
+        if self.recursos is not None:
+            try:
+                host = self.recursos.resumen()
+            except Exception:                    # noqa: BLE001 - medir recursos nunca debe impedir el latido
+                host = None
+                log.warning("no se pudo leer el resumen de recursos: se manda el inventario sin él", exc_info=True)
+            if host:
+                instantanea["host"] = host
         self.cliente.enviar_inventario(instantanea)
 
     def _intentar(self, que: str, accion) -> bool:
