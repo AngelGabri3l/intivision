@@ -118,6 +118,8 @@ CREATE TABLE edge_devices (
                              CHECK (status IN ('pending', 'active', 'revoked')),
     version      text,
     last_seen_at timestamptz,
+    host_stats       jsonb,          -- H13: lo último que reportó de CPU y memoria
+    host_reported_at timestamptz,    -- H13: cuándo lo reportó
     created_at   timestamptz NOT NULL DEFAULT now(),
     UNIQUE (community_id, name),
     CONSTRAINT ux_edge_id_community UNIQUE (id, community_id)

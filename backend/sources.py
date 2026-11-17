@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 
@@ -26,6 +27,9 @@ KINDS = ("usb", "rtsp", "onvif")
 STATES = ("available", "disconnected", "error")
 _FORMAT_RE = re.compile(r"^[A-Za-z0-9_ .-]{1,16}$")
 DESTINOS = ("private", "common")
+HOST_STALE_SECONDS = int(os.environ.get("EDGE_HOST_STALE_SECONDS", "900"))   # el uso de CPU y memoria de más de esto se marca como viejo (H13)
+HOST_CPU_ALERT = 85.0       # CPU promedio (%) a partir de la cual el panel avisa que el equipo va justo
+HOST_MEM_ALERT = 90.0       # memoria en uso (%) a partir de la cual el panel avisa
 ONLINE_SECONDS = int(os.environ.get("EDGE_ONLINE_SECONDS", "120"))    # una mini PC sin latido por más de esto se muestra «sin señal»
 
 
@@ -72,6 +76,40 @@ def _caps(valor):
                 return None, f"caps.{clave} debe ser un entero entre 0 y 20000."
             limpio[clave] = numero
     return limpio, None
+
+
+def _numero(v, minimo, maximo):
+    """Un número finito dentro del rango, o None. Los booleanos y los textos no son números."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    return v if math.isfinite(v) and minimo <= v <= maximo else None
+
+
+def _host_stats(crudo):
+    """
+    Lo que usa la mini PC (H13): CPU promedio y pico de una ventana, y memoria usada y total. Devuelve el dato limpio o None si no viene o
+    no es válido: un dato de recursos malo no debe tirar el latido, así que se ignora y el inventario se acepta igual.
+    """
+    if not isinstance(crudo, dict):
+        return None
+    promedio, pico = _numero(crudo.get("cpu_avg"), 0, 100), _numero(crudo.get("cpu_peak"), 0, 100)
+    total, usada = _numero(crudo.get("mem_total_mb"), 1, 16_777_216), _numero(crudo.get("mem_used_mb"), 0, 16_777_216)
+    ventana = _numero(crudo.get("window_s"), 1, 3600)
+    if None in (promedio, pico, total, usada, ventana) or usada > total or pico + 0.05 < promedio:
+        return None
+    return {"cpu_avg": round(promedio, 1), "cpu_peak": round(pico, 1), "mem_used_mb": int(round(usada)),
+            "mem_total_mb": int(round(total)), "window_s": int(round(ventana))}
+
+
+def host_para_panel(stats, edad_s):
+    """El uso de CPU y memoria tal como lo ve el panel: con su antigüedad, el porcentaje de memoria y qué avisos corresponden."""
+    if not isinstance(stats, dict):
+        return None
+    mem_pct = round(stats["mem_used_mb"] * 100.0 / stats["mem_total_mb"], 1)
+    vieja = edad_s is None or edad_s > HOST_STALE_SECONDS
+    avisos = [] if vieja else [a for a, alto in (("cpu", stats["cpu_avg"] > HOST_CPU_ALERT), ("mem", mem_pct > HOST_MEM_ALERT)) if alto]
+    return {**stats, "age_s": edad_s, "mem_pct": mem_pct, "stale": vieja, "alerts": avisos}
 
 
 def validate_inventory(payload):
@@ -123,7 +161,7 @@ def validate_inventory(payload):
         vistas.add(clave)
         limpias.append({"key": clave, "kind": kind, "label": label, "state": state, "caps": caps,
                         "address": address or None, "detail": detail or None})
-    return {"agent_version": version, "sources": limpias}, None
+    return {"agent_version": version, "sources": limpias, "host": _host_stats(payload.get("host"))}, None
 
 
 # ------------------------------------------------------------------ inventario de la mini PC
@@ -162,6 +200,9 @@ def upsert_inventory(edge, inventario):
                     (edge["id"],))
         if inventario["agent_version"]:
             cur.execute("UPDATE edge_devices SET version = %s WHERE id = %s", (inventario["agent_version"], edge["id"]))
+        if inventario.get("host"):          # solo lo último; si una versión vieja del agente no lo manda, queda el anterior y se va marcando como viejo
+            cur.execute("UPDATE edge_devices SET host_stats = %s::jsonb, host_reported_at = now() WHERE id = %s",
+                        (json.dumps(inventario["host"]), edge["id"]))
     return {"sources": len(inventario["sources"]), "new": nuevas}
 
 
@@ -241,7 +282,10 @@ def list_equipos(admin):
     with db.cursor() as cur:
         cur.execute("""SELECT d.id::text AS id, d.name, d.status, d.version, d.last_seen_at,
                               CASE WHEN d.last_seen_at IS NULL THEN NULL
-                                   ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - d.last_seen_at)))::bigint END AS seconds_since
+                                   ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - d.last_seen_at)))::bigint END AS seconds_since,
+                              d.host_stats,
+                              CASE WHEN d.host_reported_at IS NULL THEN NULL
+                                   ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - d.host_reported_at)))::bigint END AS host_age_s
                        FROM edge_devices d WHERE d.community_id = %s ORDER BY lower(d.name), d.name""", (comunidad,))
         equipos = [dict(r) for r in cur.fetchall()]
         cur.execute("""SELECT s.id::text AS id, s.edge_device_id::text AS edge_id, s.kind, s.label, s.state, s.caps, s.address,
@@ -271,6 +315,7 @@ def list_equipos(admin):
     for e in equipos:
         e["state"] = _estado_equipo(e["status"], e["last_seen_at"], e["seconds_since"])
         e["last_seen_at"] = _iso(e["last_seen_at"])
+        e["host"] = host_para_panel(e.pop("host_stats"), e.pop("host_age_s"))
         e["sources"] = por_equipo.get(e["id"], [])
     return {"equipos": equipos, "personas": personas, "online_seconds": ONLINE_SECONDS,
             "limites": {"name_min": cameras.NAME_MIN, "name_max": cameras.NAME_MAX, "place_max": cameras.PLACE_MAX}}

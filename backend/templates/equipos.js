@@ -58,6 +58,20 @@
     var v = e.version ? "Versión " + e.version : "Versión sin reportar";
     return v + (e.last_seen_at ? " · Última señal: hace " + hace(e.seconds_since) : " · Sin señales todavía");
   }
+  function pct(n) { return Math.round(Number(n) || 0) + " %"; }
+  function gb(mb) { return (Number(mb) / 1024).toFixed(1).replace(".", ","); }
+  // Lo que usa la mini PC (H13): CPU promedio y pico de los últimos minutos, y la memoria en uso.
+  function describirRecursos(e) {
+    var h = e.host;
+    if (!h) { return { texto: "Recursos: sin reportar", alerta: false, ayuda: "Esta mini PC todavía no manda su uso de CPU y memoria (¿tiene una versión anterior del agente?)." }; }
+    if (h.stale) { return { texto: "Recursos: sin datos recientes (el último, hace " + hace(h.age_s) + ")", alerta: false, ayuda: "El dato de CPU y memoria es viejo: la mini PC dejó de reportarlo." }; }
+    var texto = "CPU " + pct(h.cpu_avg) + " (pico " + pct(h.cpu_peak) + ") · Memoria " + gb(h.mem_used_mb) + " / " + gb(h.mem_total_mb) + " GB (" + pct(h.mem_pct) + ") · actualizado hace " + hace(h.age_s);
+    var altos = [];
+    if (h.alerts && h.alerts.indexOf("cpu") >= 0) { altos.push("CPU"); }
+    if (h.alerts && h.alerts.indexOf("mem") >= 0) { altos.push("memoria"); }
+    if (altos.length) { texto += " · Uso alto de " + altos.join(" y "); }
+    return { texto: texto, alerta: altos.length > 0, ayuda: "CPU: promedio y pico de los últimos " + Math.max(1, Math.round(h.window_s / 60)) + " min. Memoria: la que está en uso ahora." };
+  }
   function describirAsignacion(f) {
     var c = f.camera;
     if (!c) { return { texto: "Sin asignar", clase: "eq-chip eq-chip--sin", detalle: "" }; }
@@ -413,7 +427,8 @@
     t.chip = el("span");
     titulo.appendChild(t.nombre); titulo.appendChild(t.chip);
     t.meta = el("p", "eq-equipo__meta");
-    cab.appendChild(titulo); cab.appendChild(t.meta);
+    t.recursos = el("p", "eq-equipo__recursos");
+    cab.appendChild(titulo); cab.appendChild(t.meta); cab.appendChild(t.recursos);
     t.lista = el("div", "eq-equipo__filas");
     t.sinCamaras = el("p", "eq-vacio-equipo", "Este equipo todavía no reportó cámaras.");
     t.el.appendChild(cab); t.el.appendChild(t.lista); t.el.appendChild(t.sinCamaras);
@@ -425,6 +440,9 @@
     var d = describirEquipo(e);
     t.chip.className = d.clase; t.chip.textContent = d.texto;
     t.meta.textContent = metaEquipo(e);
+    var uso = describirRecursos(e);
+    t.recursos.textContent = uso.texto; t.recursos.title = uso.ayuda;
+    t.recursos.className = "eq-equipo__recursos" + (uso.alerta ? " eq-equipo__recursos--alerta" : "");
     var vistas = {}, orden = [];
     (e.sources || []).forEach(function (f) {
       vistas[f.id] = true;
