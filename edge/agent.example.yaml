@@ -21,6 +21,12 @@ live:                      # la imagen en vivo que ven los vecinos desde el celu
   width: 640               # ancho de la imagen
   jpeg_quality: 70         # calidad JPEG (más baja = menos datos)
 
+clips:                     # Plan Premium: clip de video de cada evento (el plan de cada cámara lo decide el servidor)
+  enabled: true
+  fps: 8                   # cuadros por segundo del clip
+  width: 640               # ancho del clip
+  max_mb: 300              # tope de los clips que esperan salir (sin internet); se borra lo más viejo
+
 queue:                     # eventos que no se pudieron enviar (sin internet): se guardan en disco y se envían en orden al volver
   max_mb: 200              # tope de tamaño; si se pasa, se descarta lo más viejo
   max_age_h: 24            # tope de antigüedad

@@ -23,6 +23,7 @@ log = logging.getLogger("agent.cliente")
 
 TIMEOUT = (5, 20)               # (conectar, leer) en segundos
 TIMEOUT_FOTO = (5, 40)          # una foto sobre una conexión lenta tarda más
+TIMEOUT_CLIP = (5, 120)         # un clip de algunos MB sobre una conexión lenta
 CODIGOS_TRANSITORIOS = {408, 425, 429}
 
 
@@ -80,6 +81,15 @@ class ClienteServidor:
                 foto.close()
         cuerpo = self._json(r)
         return Resultado(bool(cuerpo.get("duplicate")), cuerpo.get("event_id"))
+
+    def enviar_clip(self, edge_event_id: str, ruta: str, duracion_s: float | None) -> dict:
+        """Manda el clip (MP4) de un evento ya enviado a /ingest/clip."""
+        datos = {"edge_event_id": edge_event_id}
+        if duracion_s:
+            datos["duration_s"] = f"{duracion_s:.2f}"
+        with open(ruta, "rb") as video:
+            r = self._pedir("POST", "/ingest/clip", data=datos, files={"clip": ("clip.mp4", video, "video/mp4")}, timeout=TIMEOUT_CLIP)
+        return self._json(r)
 
     def enviar_inventario(self, instantanea: dict) -> dict:
         """Manda el inventario de cámaras (también sirve de latido)."""

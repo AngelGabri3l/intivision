@@ -10,7 +10,8 @@ FROM python:3.11-slim
 ARG MOTOR=1
 
 # libglib2.0-0: la necesita OpenCV al importarse en la imagen "slim". tzdata: la hora local (el horario sensible usa la hora de Lima).
-RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 tzdata \
+# ffmpeg: codifica en H.264 el clip de video de cada evento (Plan Premium), el formato que Telegram reproduce en el chat.
+RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 tzdata ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

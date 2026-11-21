@@ -458,6 +458,76 @@ def worker_forever(stop):
         stop.wait(2)
 
 
+# ------------------------------------------------------------------ clips de video (Plan Premium)
+# Cuando llega el clip de un evento, cada aviso de ese evento queda con clip_status = 'pendiente'. Este hilo manda el video como
+# respuesta al mensaje con foto, una vez que ese mensaje ya salió. Así la alerta llega al instante y el video unos segundos después.
+
+CLIP_MAX_ATTEMPTS = 4
+_SELECT_CLIP = """
+    SELECT d.id, d.status, d.clip_attempts, d.telegram_message_id, ch.chat_id, ch.is_active,
+           e.level, c.name AS camera_name, m.storage_key AS clip, m.duration_s
+    FROM alert_deliveries d
+    JOIN notification_channels ch ON ch.id = d.channel_id
+    JOIN events e ON e.id = d.event_id
+    LEFT JOIN cameras c ON c.id = e.camera_id
+    JOIN media_files m ON m.event_id = d.event_id AND m.kind = 'clip'
+    WHERE d.clip_status = 'pendiente' AND d.status <> 'pending'
+      AND now() >= coalesce(d.sent_at, d.created_at) + make_interval(secs => (ARRAY[0, 10, 30, 90])[LEAST(d.clip_attempts, 3) + 1])
+    ORDER BY d.id LIMIT 1 FOR UPDATE OF d SKIP LOCKED
+"""
+
+
+def clip_caption(d) -> str:
+    dur = f" de {int(round(float(d['duration_s'])))} s" if d.get("duration_s") else ""
+    return f"🎥 Video del evento{dur} · {d.get('camera_name') or 'cámara'} · nivel {d.get('level') or '-'}"
+
+
+def process_clip_one() -> bool:
+    """Envía un clip pendiente que ya le toque. Devuelve True si había alguno."""
+    with db.cursor() as cur:
+        cur.execute(_SELECT_CLIP)
+        d = cur.fetchone()
+        if d is None:
+            return False
+        ruta = os.path.join(_cfg["evidence_dir"], os.path.basename(d["clip"]))
+        if d["status"] != "sent" or not d["is_active"]:
+            estado = "omitido"                                 # el aviso con foto no salió o el canal está apagado
+        elif not os.path.exists(ruta):
+            estado = "error"
+        else:
+            try:
+                _client.send_video(d["chat_id"], ruta, clip_caption(d), d["telegram_message_id"], d["duration_s"])
+                estado = "enviado"
+            except telegram_api.TelegramError as ex:
+                if ex.blocked:
+                    cur.execute("UPDATE alert_deliveries SET clip_status = 'omitido', clip_attempts = clip_attempts + 1 WHERE id = %s", (d["id"],))
+                    return True
+                intentos = d["clip_attempts"] + 1
+                cur.execute("UPDATE alert_deliveries SET clip_attempts = %s, clip_status = %s WHERE id = %s",
+                            (intentos, "error" if intentos >= CLIP_MAX_ATTEMPTS else "pendiente", d["id"]))
+                log.warning("No se pudo enviar un clip por Telegram (%s).", ex.description[:120])
+                return True
+            except Exception as ex:                             # noqa: BLE001
+                intentos = d["clip_attempts"] + 1
+                cur.execute("UPDATE alert_deliveries SET clip_attempts = %s, clip_status = %s WHERE id = %s",
+                            (intentos, "error" if intentos >= CLIP_MAX_ATTEMPTS else "pendiente", d["id"]))
+                log.warning("No se pudo enviar un clip por Telegram (%s).", telegram_api.clean(ex, _cfg["token"])[:120])
+                return True
+        cur.execute("UPDATE alert_deliveries SET clip_status = %s, clip_attempts = clip_attempts + 1 WHERE id = %s", (estado, d["id"]))
+    return True
+
+
+def clips_forever(stop):
+    while not stop.is_set():
+        try:
+            while process_clip_one():
+                pass
+        except Exception:
+            log.exception("Fallo en la cola de clips")
+            stop.wait(5)
+        stop.wait(2)
+
+
 # ------------------------------------------------------------------ revisión del administrador (H6)
 
 _RV = re.compile(r"^rv:(\d{1,18}):([cd])$")
@@ -658,7 +728,7 @@ def start(polling=True):
         log.warning("Telegram sin configurar (falta TELEGRAM_TOKEN): no habrá alertas por Telegram.")
         return
     _stop.clear()
-    for nombre, destino in (("alertas-cola", worker_forever), ("alertas-camaras", camera_watch_forever),
+    for nombre, destino in (("alertas-cola", worker_forever), ("alertas-clips", clips_forever), ("alertas-camaras", camera_watch_forever),
                             ("alertas-escalado", escalation_forever),
                             ("alertas-sondeo", poll_forever if polling else None)):
         if destino:

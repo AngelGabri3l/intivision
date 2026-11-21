@@ -145,7 +145,16 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}</div></div>')
+
+
+def video_block(r) -> str:
+    """El clip del evento (Plan Premium), plegado para no cargarlo hasta que se pida."""
+    if not r.get("clip"):
+        return ""
+    poster = f' poster="/evidence/{esc(r["image"])}"' if r.get("image") else ""
+    return (f'<details class="evento__video"><summary>▶ Ver video del evento</summary>'
+            f'<video controls preload="none" playsinline src="/evidence/{esc(r["clip"])}"{poster}></video></details>')
 
 
 def camera_status(c) -> str:

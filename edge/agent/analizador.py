@@ -190,12 +190,13 @@ def foto_del_evento(ruta: str) -> bytes | None:
 # ------------------------------------------------------------------------------------------ el hilo
 class Analizador(threading.Thread):
     def __init__(self, cargar, gestor, config, cola, enviador, dir_tmp: str, fps: float = 3.0, cooldown_s: float = 10.0,
-                 max_gap_s: float = 10.0, reloj=time.monotonic):
+                 max_gap_s: float = 10.0, reloj=time.monotonic, grabador=None):
         super().__init__(name="analizador", daemon=True)
         self._cargar = cargar                    # función sin argumentos: devuelve el motor o lanza MotorNoDisponible
         self.gestor, self.config, self.cola, self.enviador = gestor, config, cola, enviador
         self.dir_tmp, self.fps, self.cooldown_s, self.max_gap_s = dir_tmp, fps, cooldown_s, max_gap_s
         self._reloj = reloj
+        self.grabador = grabador                 # Plan Premium: pide el clip de cada evento (None = sin clips)
         self.motor = None
         self.estado_motor = "cargando"           # cargando | listo | no disponible
         self.motivo_motor: str | None = None
@@ -290,10 +291,15 @@ class Analizador(threading.Thread):
             self._decir("evento_raro", "el motor devolvió un evento que no se entiende: se ignora")
             return
         try:
-            self.cola.agregar(payload, foto)
+            eid = self.cola.agregar(payload, foto)
         except Exception:       # noqa: BLE001 - disco lleno, base bloqueada...
             self._decir("cola", "no se pudo guardar un evento en la cola", exc=True)
             return
+        if self.grabador is not None and eid:
+            try:
+                self.grabador.solicitar(cid, eid)
+            except Exception:   # noqa: BLE001 - sin clip, el evento con su foto igual sale
+                self._decir("clip", "no se pudo pedir el clip de un evento", exc=True)
         st.eventos += 1
         log.info("EVENTO %s (puntaje %s): %s", payload["level"], payload["score"], payload["reasons"])
         self.enviador.despertar()

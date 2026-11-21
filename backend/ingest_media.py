@@ -113,3 +113,54 @@ def _quitar(ruta):
         os.remove(ruta)
     except OSError:
         pass
+
+
+# ------------------------------------------------------------------ clips de video (Plan Premium)
+
+MAX_CLIP_BYTES = 20_000_000          # 20 MB: un clip de 20 s a 640 px en H.264 pesa 1 a 4 MB; Telegram acepta hasta 50 MB
+CLIP_SECONDS = (1.0, 60.0)
+
+
+class ClipError(Exception):
+    """El clip no se acepta: lleva el código HTTP y el mensaje para la mini PC."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+def validate_clip(data):
+    """Lanza ClipError si el clip no se acepta. Solo se revisa la forma (MP4), no se decodifica en el servidor."""
+    if not data:
+        raise ClipError(422, "El clip está vacío.")
+    if len(data) > MAX_CLIP_BYTES:
+        raise ClipError(413, f"El clip pasa de {MAX_CLIP_BYTES // 1_000_000} MB.")
+    if len(data) < 64 or data[4:8] != b"ftyp" or int.from_bytes(data[:4], "big") < 8:
+        raise ClipError(415, "El clip debe ser un video MP4.")
+
+
+def clip_duration(valor):
+    """La duración que informa la mini PC (segundos, entre 1 y 60), o None si no vino o no es válida."""
+    try:
+        d = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return round(d, 2) if CLIP_SECONDS[0] <= d <= CLIP_SECONDS[1] else None
+
+
+def save_clip(data, evidence_dir):
+    """Guarda el clip con un nombre que genera el servidor. Devuelve (nombre, sha256)."""
+    import hashlib
+    os.makedirs(evidence_dir, exist_ok=True)
+    nombre = f"clip_{uuid.uuid4().hex}.mp4"
+    temporal = os.path.join(evidence_dir, f".{nombre}.tmp")
+    try:
+        with open(temporal, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporal, os.path.join(evidence_dir, nombre))
+    except BaseException:
+        _quitar(temporal)
+        raise
+    return nombre, hashlib.sha256(data).hexdigest()

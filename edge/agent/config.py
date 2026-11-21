@@ -58,6 +58,10 @@ class Config:
     live_max_streams: int = 4           # cámaras en vivo a la vez
     live_width: int = 640               # ancho de la imagen en vivo
     live_jpeg_quality: int = 70
+    clips_enabled: bool = True          # grabar el clip del evento en las cámaras cuyo plan lo incluye (Premium)
+    clips_fps: float = 8.0              # cuadros por segundo del clip
+    clips_width: int = 640              # ancho del clip
+    clips_max_mb: float = 300.0         # tope de los clips que esperan ser enviados
     server_url: str | None = None       # variable SERVER_URL
     edge_token: str | None = field(default=None, repr=False)    # variable EDGE_TOKEN: nunca se imprime
 
@@ -198,6 +202,17 @@ def cargar(ruta: str | None = None) -> Config:
     cfg.live_max_streams = int(_numero(vivo, "max_streams", cfg.live_max_streams, 1, 8))
     cfg.live_width = int(_numero(vivo, "width", cfg.live_width, 160, 1280))
     cfg.live_jpeg_quality = int(_numero(vivo, "jpeg_quality", cfg.live_jpeg_quality, 20, 95))
+
+    clips = datos.get("clips") or {}
+    if not isinstance(clips, dict):
+        raise ConfigError("'clips' debe ser un diccionario (enabled, fps, width, max_mb)")
+    activo = clips.get("enabled", True)
+    if not isinstance(activo, bool):
+        raise ConfigError("'clips.enabled' debe ser true o false")
+    cfg.clips_enabled = activo
+    cfg.clips_fps = _numero(clips, "fps", cfg.clips_fps, 2, 15)
+    cfg.clips_width = int(_numero(clips, "width", cfg.clips_width, 320, 1280))
+    cfg.clips_max_mb = _numero(clips, "max_mb", cfg.clips_max_mb, 20, 5000)
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):

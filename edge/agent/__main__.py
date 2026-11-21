@@ -31,7 +31,9 @@ from .cola import ColaLocal
 from .config import ConfigError, cargar
 from .config_remota import ConfigRemota, normalizar
 from .enviador import Enviador
+from .enviador_clips import EnviadorClips
 from .evidencia import imagen_de_prueba
+from .grabador import Grabador
 from .inventory import Inventario, Vigilante, sondear_una_vez
 from .latido import Latido
 from .recursos import MuestreadorRecursos
@@ -456,7 +458,7 @@ def cmd_vigilar(args, cfg) -> int:
     # Con servidor, el administrador decide qué cámaras se leen; sin servidor, las de agent.yaml (como en H1).
     gestor = GestorCaptura(inv, [] if cliente else cfg.assigned, cfg.width, cfg.height, cfg.fps, formato=cfg.pixel_format)
     simbolo = {"aparecio": "+ apareció", "desaparecio": "- desapareció", "reaparecio": "+ volvió", "cambio": "~ cambió"}
-    cola = remota = latido = enviador = simulador = analizador = relevo = recursos = None
+    cola = remota = latido = enviador = simulador = analizador = relevo = recursos = grabador = enviador_clips = None
     if cliente:
         cola = ColaLocal(cfg.data_dir, int(cfg.queue_max_mb * 1e6), cfg.queue_max_age_h * 3600)
 
@@ -472,9 +474,15 @@ def cmd_vigilar(args, cfg) -> int:
             simulador = SimuladorEventos(cola, remota, gestor, enviador, args.simular_eventos, args.nivel_simulado)
         if cfg.live_enabled:
             relevo = Relevo(cliente.base_url, cfg.edge_token, gestor, remota, cfg.live_width, cfg.live_jpeg_quality, cfg.live_max_streams)
+        if cfg.clips_enabled:
+            dir_clips = os.path.join(cfg.data_dir, "clips")
+            grabador = Grabador(gestor, remota, dir_clips, cfg.clips_fps, cfg.clips_width, 70, cfg.clips_max_mb)
+            enviador_clips = EnviadorClips(cliente, dir_clips)
+            if not grabador.ffmpeg:
+                print("AVISO: falta ffmpeg; los clips se codifican con OpenCV y Telegram podría mostrarlos como archivo", flush=True)
         if cfg.analysis_enabled and not args.sin_deteccion:
             analizador = Analizador(lambda: cargar_motor(cfg.engine_config), gestor, remota, cola, enviador, os.path.join(cfg.data_dir, "tmp_evidencia"),
-                                    cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s)
+                                    cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s, grabador=grabador)
 
     def al_cambiar(eventos) -> None:
         for ev in eventos:
@@ -499,7 +507,7 @@ def cmd_vigilar(args, cfg) -> int:
     else:
         print(f"agente {__version__} vigilando SIN servidor (modo local); asignadas: {cfg.assigned or 'ninguna'}", flush=True)
     vigilante.start()
-    for hilo in (enviador, latido, simulador, analizador, relevo, recursos):
+    for hilo in (enviador, latido, simulador, analizador, relevo, recursos, grabador, enviador_clips):
         if hilo:
             hilo.start()
     inicio = time.monotonic()

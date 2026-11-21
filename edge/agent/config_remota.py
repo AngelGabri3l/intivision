@@ -22,6 +22,19 @@ def _numero(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+PLAN_BASE = {"code": "base", "clip_s": 0, "armas": False, "precision": "normal"}
+
+
+def normalizar_plan(p) -> dict:
+    """Lo que el plan de una cámara activa en esta mini PC. Ante cualquier duda, el plan Base (sin extras)."""
+    if not isinstance(p, dict):
+        return dict(PLAN_BASE)
+    clip = p.get("clip_s")
+    clip = int(clip) if isinstance(clip, (int, float)) and not isinstance(clip, bool) and 0 <= clip <= 60 else 0
+    return {"code": p["code"] if p.get("code") in ("base", "premium") else "base", "clip_s": clip,
+            "armas": p.get("armas") is True, "precision": "alta" if p.get("precision") == "alta" else "normal"}
+
+
 def normalizar(bruta) -> dict | None:
     """La configuración del servidor, limpia y con lo que este agente entiende. None si no es una configuración."""
     if not isinstance(bruta, dict) or not isinstance(bruta.get("cameras"), list):
@@ -38,7 +51,7 @@ def normalizar(bruta) -> dict | None:
         camaras.append({"camera_id": c["camera_id"].lower(), "device_key": c["device_key"],
                         "name": c["name"][:100] if isinstance(c.get("name"), str) else "",
                         "kind": c["kind"] if c.get("kind") in ("private", "common") else "private",
-                        "restricted_zone": zona})
+                        "restricted_zone": zona, "plan": normalizar_plan(c.get("plan"))})
     horas = bruta.get("sensitive_hours")
     if not (isinstance(horas, list) and len(horas) == 2 and all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in horas)):
         horas = None
@@ -68,6 +81,9 @@ class ConfigRemota:
     def camaras(self) -> list[dict]:
         with self._lock:
             return [dict(c) for c in self._cfg["cameras"]] if self._cfg else []
+
+    def camara(self, camera_id: str) -> dict | None:
+        return next((c for c in self.camaras() if c["camera_id"] == camera_id), None)
 
     def device_keys(self) -> list[str]:
         return [c["device_key"] for c in self.camaras()]

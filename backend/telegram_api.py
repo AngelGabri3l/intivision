@@ -103,6 +103,16 @@ class Telegram:
                 "reply_markup": json.dumps(reply_markup if reply_markup is not None else {"inline_keyboard": []})}
         return self._call("editMessageText", data=data, timeout=15)
 
+    def send_video(self, chat_id, path, caption, reply_to=None, duration=None):
+        """Envía un video MP4 (hasta 50 MB), como respuesta al mensaje `reply_to` si se indica."""
+        data = {"chat_id": chat_id, "caption": caption[:1024], "supports_streaming": "true"}
+        if reply_to:
+            data["reply_parameters"] = json.dumps({"message_id": int(reply_to), "allow_sending_without_reply": True})
+        if duration:
+            data["duration"] = int(round(float(duration)))
+        with open(path, "rb") as video:
+            return self._call("sendVideo", data=data, files={"video": video}, timeout=120)
+
     def send_photo(self, chat_id, path, caption, reply_markup=None):
         data = {"chat_id": chat_id, "caption": caption}
         if reply_markup:

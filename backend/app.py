@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa  # noqa: E402
+from backend import hitl, dashboard, mapa, planes  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -291,6 +291,7 @@ _EVENTS_SELECT = """
            (SELECT m.storage_key FROM media_files m
              WHERE m.event_id = e.id AND m.kind = 'image'
              ORDER BY m.created_at LIMIT 1) AS image,
+           (SELECT m.storage_key FROM media_files m WHERE m.event_id = e.id AND m.kind = 'clip' LIMIT 1) AS clip,
            e.people_count AS people, e.status,
            c.name AS camera_name,
            COALESCE(cu.full_name, eu.full_name) AS owner_name
@@ -720,6 +721,85 @@ async def ingest(request: Request):
         existente = await asyncio.to_thread(_edge_event_id_of, edge["community_id"], edge_event_id)
         return {"ok": True, "event_id": existente, "duplicate": True}
     return {"ok": True, "event_id": event_id, "duplicate": False}
+
+
+# ---------------------- clip de video del evento (Plan Premium) ----------------------
+
+CLIP_MAX_FORM = ingest_media.MAX_CLIP_BYTES + 20_000                   # clip + campos + estructura del formulario
+_EDGE_EVENT_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")   # el mismo formato que /ingest
+
+
+def _guardar_clip(edge, edge_event_id, datos, duracion):
+    """
+    Guarda el clip de un evento ya recibido. Devuelve (código HTTP, cuerpo).
+    409 si el evento todavía no llegó (la mini PC reintenta), 422 si la cámara no tiene clips en su plan.
+    """
+    with db.cursor() as cur:
+        cur.execute("""SELECT id, camera_id::text AS camera_id FROM events WHERE community_id = %s AND edge_event_id = %s""",
+                    (edge["community_id"], edge_event_id))
+        ev = cur.fetchone()
+        if ev is None:
+            return 409, {"error": "El evento de este clip todavía no llegó al servidor."}
+        plan = planes.de_camara(cur, ev["camera_id"]) if ev["camera_id"] else {"highlight_clips": False}
+        if not plan.get("highlight_clips") or not plan.get("clip_seconds"):
+            return 422, {"error": "Esta cámara no tiene clips en su plan."}
+        cur.execute("SELECT storage_key FROM media_files WHERE event_id = %s AND kind = 'clip'", (ev["id"],))
+        previo = cur.fetchone()
+        if previo:
+            return 200, {"ok": True, "event_id": ev["id"], "duplicate": True}
+    nombre, huella = ingest_media.save_clip(datos, EVIDENCE_DIR)
+    try:
+        with db.cursor() as cur:
+            cur.execute("""INSERT INTO media_files (community_id, camera_id, event_id, kind, is_highlight, storage_key, size_bytes,
+                                                   duration_s, sha256, expires_at)
+                           VALUES (%s, %s, %s, 'clip', true, %s, %s, %s, %s, now() + make_interval(days => %s))
+                           ON CONFLICT DO NOTHING RETURNING id""",
+                        (edge["community_id"], ev["camera_id"], ev["id"], nombre, len(datos), duracion, huella,
+                         int(plan.get("retention_days") or 7)))
+            if cur.fetchone() is None:                                 # otro envío del mismo clip llegó primero
+                ingest_media.remove_photo(EVIDENCE_DIR, nombre)
+                return 200, {"ok": True, "event_id": ev["id"], "duplicate": True}
+            cur.execute("""UPDATE alert_deliveries SET clip_status = 'pendiente'
+                           WHERE event_id = %s AND status IN ('pending', 'sent') AND clip_status IS NULL""", (ev["id"],))
+    except BaseException:
+        ingest_media.remove_photo(EVIDENCE_DIR, nombre)
+        raise
+    return 200, {"ok": True, "event_id": ev["id"], "duplicate": False}
+
+
+@app.post("/ingest/clip")
+async def ingest_clip(request: Request):
+    """
+    Recibe el clip de video (MP4) de un evento que la mini PC ya envió. Solo para cámaras con clips en su plan (Premium).
+    multipart/form-data: «edge_event_id» (el del evento), «duration_s» (opcional) y «clip» (el archivo, hasta 20 MB).
+    """
+    edge = await asyncio.to_thread(auth.edge_from_token, _bearer(request))
+    if edge is None:
+        return JSONResponse(status_code=401, content={"error": "Token de la mini PC inválido."})
+    if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        return JSONResponse(status_code=415, content={"error": "El clip se envía como multipart/form-data."})
+    cuerpo = await _read_limited(request, CLIP_MAX_FORM)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "El clip es demasiado grande."})
+    try:
+        formulario = await Request(request.scope, _replay(cuerpo)).form()
+    except Exception:                                                  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "El formulario no es válido."})
+    try:
+        eid, dur, archivo = formulario.get("edge_event_id"), formulario.get("duration_s"), formulario.get("clip")
+        if not isinstance(eid, str) or not _EDGE_EVENT_RE.match(eid):
+            return JSONResponse(status_code=422, content={"error": "Falta el campo «edge_event_id» o no es válido."})
+        if archivo is None or isinstance(archivo, str):
+            return JSONResponse(status_code=422, content={"error": "Falta el archivo «clip»."})
+        datos = await archivo.read()
+    finally:
+        await formulario.close()
+    try:
+        ingest_media.validate_clip(datos)
+    except ingest_media.ClipError as ex:
+        return JSONResponse(status_code=ex.status, content={"error": ex.message})
+    estado, respuesta = await asyncio.to_thread(_guardar_clip, edge, eid.lower(), datos, ingest_media.clip_duration(dur if isinstance(dur, str) else None))
+    return JSONResponse(status_code=estado, content=respuesta)
 
 
 # ---------------------- fuentes de cámara (H4) ----------------------
