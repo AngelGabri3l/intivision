@@ -12,12 +12,18 @@ CREATE TABLE plans (
     event_history   boolean  NOT NULL DEFAULT false,
     storage_gb      smallint NOT NULL DEFAULT 0,
     max_cameras     smallint,                 -- NULL = sin definir
-    is_active       boolean  NOT NULL DEFAULT true
+    is_active       boolean  NOT NULL DEFAULT true,
+    weapon_detection boolean NOT NULL DEFAULT false,   -- detección de posibles armas
+    high_precision   boolean NOT NULL DEFAULT false,   -- modelo de detección más preciso
+    clip_seconds    smallint NOT NULL DEFAULT 0 CONSTRAINT ck_plans_clip_seconds CHECK (clip_seconds BETWEEN 0 AND 60),        -- 0 = sin clip
+    retention_days  smallint NOT NULL DEFAULT 7 CONSTRAINT ck_plans_retention_days CHECK (retention_days BETWEEN 1 AND 3650), -- días de fotos y clips
+    weekly_report   boolean  NOT NULL DEFAULT false,  -- resumen semanal por Telegram
+    evidence_export boolean  NOT NULL DEFAULT false   -- descarga de evidencia con huella SHA-256
 );
-INSERT INTO plans (code, name, price_pen_cents,
-                   ai_detection, realtime_alerts, highlight_clips, event_history, storage_gb)
-VALUES ('base',    'Plan Base',    1490,  false, false, false, false, 0),
-       ('premium', 'Plan Premium', 10990, true,  true,  true,  true,  50);
+INSERT INTO plans (code, name, price_pen_cents, live_view, ai_detection, realtime_alerts, highlight_clips, event_history, storage_gb,
+                   weapon_detection, high_precision, clip_seconds, retention_days, weekly_report, evidence_export)
+VALUES ('base',    'Plan Base',    1490,  true, true, true, false, true, 0,  false, false, 0,  7,  false, false),
+       ('premium', 'Plan Premium', 10990, true, true, true, true,  true, 50, true,  true,  20, 90, true,  true);
 
 CREATE TABLE districts (
     ubigeo     char(6) PRIMARY KEY,
@@ -38,7 +44,8 @@ CREATE TABLE communities (
     settings        jsonb        NOT NULL DEFAULT '{}'::jsonb,
     media_key_ref   text,                      
     is_active       boolean      NOT NULL DEFAULT true,
-    created_at      timestamptz  NOT NULL DEFAULT now()
+    created_at      timestamptz  NOT NULL DEFAULT now(),
+    plan_code       text         NOT NULL DEFAULT 'base' REFERENCES plans (code)   -- plan de la comunidad (cobro agrupado)
 );
 CREATE INDEX ix_communities_district ON communities (district_ubigeo);
 
@@ -252,6 +259,7 @@ CREATE TABLE media_files (
 CREATE INDEX ix_media_user_time      ON media_files (user_id, created_at DESC);
 CREATE INDEX ix_media_community_time ON media_files (community_id, created_at DESC);
 CREATE INDEX ix_media_event          ON media_files (event_id);
+CREATE UNIQUE INDEX ux_media_clip_event  ON media_files (event_id) WHERE kind = 'clip';   -- un solo clip por evento
 
 
 CREATE TABLE signals (
@@ -267,7 +275,8 @@ INSERT INTO signals (code, description) VALUES
     ('proximity',          'Cercanía entre personas'),
     ('climbing',           'Trepando'),
     ('fallen',             'Persona en el suelo'),
-    ('hands_up',           'Posible asalto (manos arriba)');
+    ('hands_up',           'Posible asalto (manos arriba)'),
+    ('weapon',             'Posible arma');
 
 CREATE TABLE event_signals (
     event_id    bigint NOT NULL REFERENCES events (id)    ON DELETE CASCADE,
@@ -319,9 +328,13 @@ CREATE TABLE alert_deliveries (
     audience   text        NOT NULL DEFAULT 'normal',   -- a quién iba: normal, review (administradores, con botones), broadcast, escalated (H6)
     telegram_message_id bigint,                         -- el mensaje enviado, para actualizarlo al revisar la alerta (H6)
     has_photo  boolean     NOT NULL DEFAULT false,
-    CONSTRAINT ck_alert_deliveries_audience CHECK (audience IN ('normal', 'review', 'broadcast', 'escalated'))
+    clip_status   text,                                 -- el clip del evento como respuesta al aviso (Premium)
+    clip_attempts smallint NOT NULL DEFAULT 0,
+    CONSTRAINT ck_alert_deliveries_audience CHECK (audience IN ('normal', 'review', 'broadcast', 'escalated')),
+    CONSTRAINT ck_alert_deliveries_clip CHECK (clip_status IS NULL OR clip_status IN ('pendiente', 'enviado', 'error', 'omitido'))
 );
 CREATE INDEX ix_alert_deliveries_event ON alert_deliveries (event_id);
+CREATE INDEX ix_deliveries_clip ON alert_deliveries (id) WHERE clip_status = 'pendiente';
 CREATE INDEX ix_deliveries_open
     ON alert_deliveries (status, created_at) WHERE status <> 'sent';
 

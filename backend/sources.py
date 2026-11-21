@@ -17,7 +17,7 @@ import re
 
 import psycopg2.errors
 
-from backend import cameras, db
+from backend import cameras, db, planes
 
 log = logging.getLogger("guardian.sources")
 
@@ -225,11 +225,15 @@ def _sensitive_hours(valor):
 def edge_config(edge):
     """Lo que esta mini PC debe analizar: solo sus cámaras asignadas y activas, y el horario sensible."""
     with db.cursor() as cur:
-        cur.execute("""SELECT c.id::text AS camera_id, s.device_key, c.name, c.kind, c.restricted_zone
+        cur.execute(f"""SELECT c.id::text AS camera_id, s.device_key, c.name, c.kind, c.restricted_zone,
+                              {planes.sql_es_premium('c')} AS premium
                        FROM cameras c JOIN camera_sources s ON s.id = c.source_id
                        WHERE c.edge_device_id = %s AND c.community_id = %s AND c.is_active
                        ORDER BY c.created_at, c.id""", (edge["id"], edge["community_id"]))
         camaras = [dict(r) for r in cur.fetchall()]
+        tabla = planes.todos(cur)
+        for c in camaras:
+            c["plan"] = planes.funciones(tabla.get("premium" if c.pop("premium") else "base", {"code": "base"}))
         cur.execute("SELECT settings FROM communities WHERE id = %s", (edge["community_id"],))
         fila = cur.fetchone()
     ajustes = fila["settings"] if fila and isinstance(fila["settings"], dict) else {}

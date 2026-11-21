@@ -162,11 +162,16 @@ def ownership_text(c, user) -> str:
     return "Visible para el administrador" if c["admin_can_view"] else "Oculta al administrador"
 
 
+def plan_badge(c) -> str:
+    """La marca «Premium» de una cámara (las del plan Base no llevan marca)."""
+    return '<span class="plan plan--premium" title="Clip de video, posibles armas y detección más precisa">Premium</span>' if c.get("premium") else ""
+
+
 def camera_card(c, user) -> str:
     lugar = f'<p class="cam__lugar">{esc(c["place"])}</p>' if c["place"] else ""
     ultimo = level_badge(c["ultimo_nivel"]) if c["ultimo_nivel"] else ""
     return (f'<article class="cam" role="listitem"><div class="cam__fila">'
-            f'<h3 class="cam__nombre">{esc(c["name"])}</h3>{ultimo}</div>{lugar}'
+            f'<h3 class="cam__nombre">{esc(c["name"])}</h3><span class="cam__marcas">{plan_badge(c)}{ultimo}</span></div>{lugar}'
             f'<div class="cam__datos"><span>{esc(cameras.SOURCE_TEXT.get(c["source_type"], c["source_type"]))}</span>'
             f'<span>{camera_status(c)}</span>'
             f'<span>{count_text(c["hoy"], "evento hoy", "eventos hoy")} · {c["total"]} en total</span>'
@@ -254,7 +259,8 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
     datos = (f'<div class="ficha"><span class="ficha__clave">Tipo</span><span>{esc(cameras.SOURCE_TEXT.get(cam["source_type"], cam["source_type"]))}</span>'
              f'<span class="ficha__clave">Estado</span><span>{camera_status(cam)}</span>'
              f'<span class="ficha__clave">Dueño</span><span>{"Zona común" if cam["kind"] == "common" else esc(cam["owner_name"])}</span>'
-             f'<span class="ficha__clave">Eventos</span><span>{cam["total"]} en total</span></div>')
+             f'<span class="ficha__clave">Eventos</span><span>{cam["total"]} en total</span>'
+             f'<span class="ficha__clave">Plan</span><span>{"Premium" if cam.get("premium") else "Base"}</span></div>')
 
     if es_dueno and cam["kind"] == "private":
         visible = cam["admin_can_view"]

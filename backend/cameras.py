@@ -8,7 +8,7 @@ import datetime
 import os
 import re
 
-from backend import db
+from backend import db, planes
 
 MAX_CAMERAS_PER_USER = int(os.environ.get("MAX_CAMERAS_PER_USER", "10"))
 NAME_MIN, NAME_MAX, PLACE_MAX = 2, 60, 80
@@ -61,7 +61,8 @@ _SELECT = """
                AND e.occurred_at >= (date_trunc('day', now() AT TIME ZONE 'America/Lima') AT TIME ZONE 'America/Lima')) AS hoy,
            (SELECT count(*) FROM events e WHERE e.camera_id = c.id AND e.occurred_at >= now() - interval '7 days') AS semana,
            (SELECT count(*) FROM events e WHERE e.camera_id = c.id AND e.level = 'ALTO') AS altos,
-           (SELECT e.level FROM events e WHERE e.camera_id = c.id ORDER BY e.id DESC LIMIT 1) AS ultimo_nivel
+           (SELECT e.level FROM events e WHERE e.camera_id = c.id ORDER BY e.id DESC LIMIT 1) AS ultimo_nivel,
+           """ + planes.sql_es_premium("c") + """ AS premium
     FROM cameras c LEFT JOIN users u ON u.id = c.user_id
 """
 

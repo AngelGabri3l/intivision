@@ -19,6 +19,10 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage demo-borrar --community-slug cuadra-01
   docker compose exec -it backend python -m backend.manage set-password --user correo@ejemplo.com
   docker compose exec backend python -m backend.manage set-status --user correo@ejemplo.com --status suspended
+  docker compose exec backend python -m backend.manage list-plans
+  docker compose exec backend python -m backend.manage set-plan --community-slug cuadra-01 --plan premium      (toda la comunidad)
+  docker compose exec backend python -m backend.manage set-plan --user correo@ejemplo.com --plan premium --dias 30  (sus cámaras)
+  docker compose exec backend python -m backend.manage set-plan --user correo@ejemplo.com --plan base
 
 La contraseña se pide por teclado (no se ve y no queda en el historial). Para automatizar se puede
 pasar el nombre de una variable de entorno con --password-env.
@@ -33,7 +37,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, cameras, db, mapa  # noqa: E402
+from backend import auth, cameras, db, mapa, planes  # noqa: E402
 
 
 def ask_password(args, *contexto):
@@ -322,6 +326,50 @@ def demo_borrar(args):
     print(f"Se borraron {n} eventos de demostración de «{args.community_slug}».")
 
 
+def list_plans(args):
+    """Los planes con sus beneficios, el plan de cada comunidad y quién tiene Premium propio."""
+    with db.cursor() as cur:
+        for code, p in planes.todos(cur).items():
+            clip = f"clip de {p['clip_seconds']} s" if p["highlight_clips"] and p["clip_seconds"] else "sin clip"
+            print(f"{p['name']} (S/ {p['price_pen_cents'] / 100:.2f}): {clip}; armas {'sí' if p['weapon_detection'] else 'no'}; "
+                  f"precisión {'alta' if p['high_precision'] else 'normal'}; evidencias {p['retention_days']} días; "
+                  f"resumen semanal {'sí' if p['weekly_report'] else 'no'}; descarga de evidencia {'sí' if p['evidence_export'] else 'no'}")
+        cur.execute("SELECT name, slug, plan_code FROM communities ORDER BY name")
+        print("\nComunidades:")
+        for r in cur.fetchall():
+            print(f"  {r['name']} ({r['slug']}): {planes.nombre(r['plan_code'])}")
+        cur.execute("""SELECT u.full_name, coalesce(u.email, u.phone) AS contacto, s.current_period_end
+                       FROM subscriptions s JOIN users u ON u.id = s.user_id
+                       WHERE s.plan_code = 'premium' AND s.status IN ('active', 'trialing')
+                         AND (s.current_period_end IS NULL OR s.current_period_end > now()) ORDER BY u.full_name""")
+        filas = cur.fetchall()
+        print("\nPremium por vivienda:" + ("" if filas else " nadie"))
+        for r in filas:
+            hasta = r["current_period_end"].astimezone().strftime("%d/%m/%Y") if r["current_period_end"] else "sin vencimiento"
+            print(f"  {r['full_name']} ({r['contacto']}), hasta {hasta}")
+
+
+def set_plan(args):
+    """Pone el plan de una comunidad entera o de una vivienda (las cámaras privadas de ese usuario)."""
+    if bool(args.community_slug) == bool(args.user):
+        sys.exit("Indica --community-slug (toda la comunidad) o --user (sus cámaras privadas), uno de los dos.")
+    if args.dias is not None and args.dias < 0:
+        sys.exit("--dias no puede ser negativo (0 = sin vencimiento).")
+    with db.cursor() as cur:
+        if args.community_slug:
+            planes.asignar_comunidad(cur, community_id(cur, args.community_slug), args.plan)
+            print(f"La comunidad «{args.community_slug}» quedó en el Plan {planes.nombre(args.plan)}. "
+                  "La mini PC recibe el cambio en su siguiente latido (unos 30 s).")
+        else:
+            u = find_user(cur, args.user)
+            planes.asignar_usuario(cur, u["id"], args.plan, 30 if args.dias is None else args.dias)
+            if args.plan == "premium":
+                vence = "sin vencimiento" if args.dias == 0 else f"por {30 if args.dias is None else args.dias} días"
+                print(f"{u['full_name']} tiene Plan Premium {vence} en sus cámaras privadas.")
+            else:
+                print(f"{u['full_name']} volvió al Plan Base (se canceló su suscripción vigente).")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Administración de INTIVISION")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -384,6 +432,16 @@ def main():
     p = sub.add_parser("demo-borrar", help="borra los eventos de demostración (los reales no se tocan)")
     p.add_argument("--community-slug", required=True)
     p.set_defaults(fn=demo_borrar)
+
+    p = sub.add_parser("list-plans", help="los planes, el plan de cada comunidad y quién tiene Premium propio")
+    p.set_defaults(fn=list_plans)
+
+    p = sub.add_parser("set-plan", help="pone el Plan Base o Premium a una comunidad o a una vivienda")
+    p.add_argument("--community-slug", help="toda la comunidad (cobro agrupado)")
+    p.add_argument("--user", help="correo o teléfono: sus cámaras privadas")
+    p.add_argument("--plan", required=True, choices=list(planes.PLANES))
+    p.add_argument("--dias", type=int, help="solo con --user y Premium: duración en días (por defecto 30; 0 = sin vencimiento)")
+    p.set_defaults(fn=set_plan)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")
