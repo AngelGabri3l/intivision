@@ -37,6 +37,7 @@ RUN pip install --no-cache-dir -r edge/requirements-live.txt
 # Los módulos del motor (los mismos que usa el servidor; el agente no los modifica) y el agente.
 COPY engine.py detector.py pose_detector.py threat_scoring.py tracker.py confirmation.py config.yaml ./
 COPY edge/agent edge/agent
+COPY tools/benchmark_premium.py tools/benchmark_premium.py
 
 ENV PYTHONPATH=/app/edge:/app \
     PYTHONUNBUFFERED=1 \
