@@ -27,6 +27,11 @@ clips:                     # Plan Premium: clip de video de cada evento (el plan
   width: 640               # ancho del clip
   max_mb: 300              # tope de los clips que esperan salir (sin internet); se borra lo más viejo
 
+premium:                   # Plan Premium (el servidor decide qué cámaras lo tienen)
+  precise_model: yolo11s.pt  # modelo de personas más preciso (viene en la imagen)
+  weapons_model: null      # pesos entrenados para armas, por ejemplo /data/armas.pt; sin ellos se detectan solo armas blancas
+  weapons_conf: 0.45       # confianza mínima de una posible arma
+
 queue:                     # eventos que no se pudieron enviar (sin internet): se guardan en disco y se envían en orden al volver
   max_mb: 200              # tope de tamaño; si se pasa, se descarta lo más viejo
   max_age_h: 24            # tope de antigüedad

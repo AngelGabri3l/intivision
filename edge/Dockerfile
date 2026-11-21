@@ -27,7 +27,7 @@ RUN if [ "$MOTOR" = "1" ]; then \
         && pip install --no-cache-dir -r edge/requirements-motor.txt \
         && pip uninstall -y opencv-python \
         && pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.8.0,<6" \
-        && python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-pose.pt')"; \
+        && python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-pose.pt'); YOLO('yolo11s.pt')"; \
     fi
 
 # La imagen en vivo (cliente WebSocket). En una capa APARTE y después del motor: si cambia, no se reinstala PyTorch.

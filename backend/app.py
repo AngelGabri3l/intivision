@@ -199,8 +199,9 @@ REASON_CODES = [
     ("trepando", "climbing"),
     ("persona en el suelo", "fallen"),
     ("posible asalto", "hands_up"),
+    ("posible arma", "weapon"),
 ]
-DETAIL_CODES = {"loitering", "group"}          # estos llevan detalle ("merodeo 18s", "grupo de 3")
+DETAIL_CODES = {"loitering", "group", "weapon"}          # estos llevan detalle ("merodeo 18s", "grupo de 3")
 
 
 def _sin_tildes(texto):

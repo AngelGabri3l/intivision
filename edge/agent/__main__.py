@@ -26,6 +26,7 @@ import time
 from . import __version__
 from .capture import Captura, GestorCaptura
 from .analizador import Analizador, MotorNoDisponible, SesionCamara, cargar_motor
+from .armas import DetectorArmas
 from .cliente import ClienteServidor, ErrorTransitorio, NoAutorizado, Rechazado
 from .cola import ColaLocal
 from .config import ConfigError, cargar
@@ -482,7 +483,9 @@ def cmd_vigilar(args, cfg) -> int:
                 print("AVISO: falta ffmpeg; los clips se codifican con OpenCV y Telegram podría mostrarlos como archivo", flush=True)
         if cfg.analysis_enabled and not args.sin_deteccion:
             analizador = Analizador(lambda: cargar_motor(cfg.engine_config), gestor, remota, cola, enviador, os.path.join(cfg.data_dir, "tmp_evidencia"),
-                                    cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s, grabador=grabador)
+                                    cfg.analysis_fps, cfg.analysis_event_cooldown_s, cfg.analysis_max_gap_s, grabador=grabador,
+                                    cargar_preciso=lambda: cargar_motor(cfg.engine_config, {"detector": {"model": cfg.premium_precise_model}}),
+                                    crear_armas=lambda: DetectorArmas(cfg.premium_weapons_model, cfg.premium_weapons_conf))
 
     def al_cambiar(eventos) -> None:
         for ev in eventos:

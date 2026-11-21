@@ -62,8 +62,16 @@ def buscar_dir_motor() -> str:
     raise MotorNoDisponible("no encuentro engine.py (busqué en: " + ", ".join(visitados) + ")")
 
 
-def cargar_motor(ruta_config: str | None = None):
-    """El GuardianEngine, listo para crear sesiones. Lanza MotorNoDisponible si no se puede."""
+def _mezclar(base: dict, extra: dict) -> dict:
+    salida = dict(base)
+    for k, v in (extra or {}).items():
+        salida[k] = _mezclar(salida.get(k) or {}, v) if isinstance(v, dict) and isinstance(salida.get(k), (dict, type(None))) else v
+    return salida
+
+
+def cargar_motor(ruta_config: str | None = None, ajustes: dict | None = None):
+    """El GuardianEngine, listo para crear sesiones. `ajustes` cambia partes de la configuración (por ejemplo, otro modelo).
+    Lanza MotorNoDisponible si no se puede."""
     dir_motor = buscar_dir_motor()
     if dir_motor not in sys.path:
         sys.path.insert(0, dir_motor)
@@ -75,6 +83,8 @@ def cargar_motor(ruta_config: str | None = None):
         raise MotorNoDisponible(f"no pude leer la configuración del motor ({ruta}): {e.__class__.__name__}") from None
     if not isinstance(cfg, dict):
         raise MotorNoDisponible(f"la configuración del motor ({ruta}) debe ser un diccionario YAML")
+    if ajustes:
+        cfg = _mezclar(cfg, ajustes)
     try:
         from engine import GuardianEngine
         return GuardianEngine(cfg)
@@ -101,6 +111,8 @@ class SesionCamara:
         self.eventos = 0
         self.ms_total = 0.0
         self.nivel, self.personas, self.puntaje, self.motivos = "-", 0, 0, []
+        self.ultimo_cuadro = None
+        self.armas = None                               # confirmación de armas (se crea si el plan de la cámara las incluye)
         self._crear()
 
     @staticmethod
@@ -135,6 +147,7 @@ class SesionCamara:
         if ancho != ANCHO_ANALISIS:
             cuadro = cv2.resize(cuadro, (ANCHO_ANALISIS, max(16, round(alto * ANCHO_ANALISIS / ancho))),
                                 interpolation=cv2.INTER_AREA if ancho > ANCHO_ANALISIS else cv2.INTER_LINEAR)
+        self.ultimo_cuadro = cuadro
         t0 = time.perf_counter()
         res = self.sesion.process(cuadro)
         self.ms_total += (time.perf_counter() - t0) * 1000
@@ -167,6 +180,12 @@ def evento_a_payload(camera_id: str, ev: dict) -> dict | None:
             "occurred_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
+def _motivos(m) -> list[str]:
+    if isinstance(m, (list, tuple)):
+        return [str(x) for x in m if str(x).strip()]
+    return [x.strip() for x in str(m or "").split(",") if x.strip()]
+
+
 def foto_del_evento(ruta: str) -> bytes | None:
     """Lee la foto que dejó el motor, la deja por debajo del tope del servidor y BORRA el archivo."""
     try:
@@ -190,13 +209,19 @@ def foto_del_evento(ruta: str) -> bytes | None:
 # ------------------------------------------------------------------------------------------ el hilo
 class Analizador(threading.Thread):
     def __init__(self, cargar, gestor, config, cola, enviador, dir_tmp: str, fps: float = 3.0, cooldown_s: float = 10.0,
-                 max_gap_s: float = 10.0, reloj=time.monotonic, grabador=None):
+                 max_gap_s: float = 10.0, reloj=time.monotonic, grabador=None, cargar_preciso=None, crear_armas=None):
         super().__init__(name="analizador", daemon=True)
         self._cargar = cargar                    # función sin argumentos: devuelve el motor o lanza MotorNoDisponible
         self.gestor, self.config, self.cola, self.enviador = gestor, config, cola, enviador
         self.dir_tmp, self.fps, self.cooldown_s, self.max_gap_s = dir_tmp, fps, cooldown_s, max_gap_s
         self._reloj = reloj
         self.grabador = grabador                 # Plan Premium: pide el clip de cada evento (None = sin clips)
+        self._cargar_preciso, self._crear_armas = cargar_preciso, crear_armas
+        self.motor_preciso = None
+        self.estado_preciso = "sin pedir"        # sin pedir | listo | no disponible
+        self.detector_armas = None
+        self.estado_armas = "sin pedir"
+        self.avisos_arma = 0
         self.motor = None
         self.estado_motor = "cargando"           # cargando | listo | no disponible
         self.motivo_motor: str | None = None
@@ -256,11 +281,40 @@ class Analizador(threading.Thread):
                 self._decir(f"error:{cid}", "falló el análisis de un cuadro", exc=True)
         return analizados
 
+    # --- Plan Premium: motor preciso y detector de armas, se cargan la primera vez que una cámara los necesita
+    def _motor_para(self, cam: dict):
+        if (cam.get("plan") or {}).get("precision") != "alta" or self._cargar_preciso is None:
+            return self.motor
+        if self.estado_preciso == "sin pedir":
+            try:
+                self.motor_preciso = self._cargar_preciso()
+                if self.cooldown_s:
+                    self.motor_preciso.event_cooldown_s = self.cooldown_s
+                self.estado_preciso = "listo"
+                log.info("motor de alta precisión listo para las cámaras Premium")
+            except Exception as e:      # noqa: BLE001 - sin el modelo preciso se sigue con el normal
+                self.estado_preciso = "no disponible"
+                log.warning("no se pudo cargar el motor de alta precisión (%s): las cámaras Premium usan el normal", str(e)[:200])
+        return self.motor_preciso if self.estado_preciso == "listo" else self.motor
+
+    def _armas(self):
+        if self._crear_armas is None:
+            return None
+        if self.estado_armas == "sin pedir":
+            try:
+                self.detector_armas = self._crear_armas()
+                self.estado_armas = "listo"
+            except Exception as e:      # noqa: BLE001
+                self.estado_armas = "no disponible"
+                log.warning("no se pudo cargar el detector de armas (%s): las cámaras Premium siguen sin él", str(e)[:200])
+        return self.detector_armas if self.estado_armas == "listo" else None
+
     def _analizar(self, cid: str, cam: dict) -> int:
         zona, horas = cam.get("restricted_zone"), self.config.horario_sensible()
+        motor = self._motor_para(cam)
         st = self._sesiones.get(cid)
-        if st is None or st.firma() != SesionCamara.firma_de(zona, horas):
-            st = SesionCamara(self.motor, os.path.join(self.dir_tmp, cid[:8]), zona, horas)
+        if st is None or st.firma() != SesionCamara.firma_de(zona, horas) or st.motor is not motor:
+            st = SesionCamara(motor, os.path.join(self.dir_tmp, cid[:8]), zona, horas)
             self._sesiones[cid] = st
             log.info("análisis iniciado para la cámara «%s» (%s, %s)", cam.get("name") or cid[:8],
                      "con zona restringida" if zona else "sin zona", f"horario sensible {horas[0]}:00 a {horas[1]}:00" if horas else "horario del motor")
@@ -279,14 +333,55 @@ class Analizador(threading.Thread):
         st.errores = 0
         self._tiempos.append(st.ultimo_analisis)
         ev = res.get("event") if isinstance(res, dict) else None
+        arma = self._revisar_armas(cam, st, res)
         if ev:
+            if arma:
+                ev = dict(ev, level="ALTO", score=max(int(ev.get("score") or 0), 9),
+                          reasons=_motivos(ev.get("reasons")) + [f"posible arma ({arma['tipo']})"])
             self._encolar(cid, st, ev)
+        elif arma:
+            self._encolar_arma(cid, st, res, arma)
         return 1
+
+    def _revisar_armas(self, cam: dict, st: SesionCamara, res) -> dict | None:
+        """Si el plan de la cámara incluye armas y hay personas, busca armas. Devuelve la confirmada, o None."""
+        if not (cam.get("plan") or {}).get("armas") or not isinstance(res, dict) or not res.get("people"):
+            if st.armas is not None and not (cam.get("plan") or {}).get("armas"):
+                st.armas = None
+            return None
+        detector = self._armas()
+        if detector is None or st.ultimo_cuadro is None:
+            return None
+        if st.armas is None:
+            from .armas import ConfirmacionArmas
+            st.armas = ConfirmacionArmas()
+        encontradas = detector.detectar(st.ultimo_cuadro)
+        if st.armas.registrar(bool(encontradas), self._reloj()):
+            self.avisos_arma += 1
+            return encontradas[0]
+        return None
+
+    def _encolar_arma(self, cid: str, st: SesionCamara, res: dict, arma: dict) -> None:
+        """Un evento propio por un arma confirmada cuando el motor no generó uno en ese cuadro."""
+        foto = None
+        try:
+            vis = st.ultimo_cuadro.copy()
+            x1, y1, x2, y2 = arma["bbox"]
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            foto = codificar_jpeg(vis)
+        except Exception:       # noqa: BLE001 - sin foto, el aviso igual sale
+            pass
+        payload = evento_a_payload(cid, {"level": "ALTO", "score": max(int(res.get("score") or 0), 9), "people": res.get("people") or 1,
+                                          "reasons": _motivos(res.get("reasons")) + [f"posible arma ({arma['tipo']})"]})
+        self._encolar_payload(cid, st, payload, foto)
 
     def _encolar(self, cid: str, st: SesionCamara, ev: dict) -> None:
         payload = evento_a_payload(cid, ev)
         ruta = os.path.join(st.dir, os.path.basename(str(ev.get("image") or "sin_foto")))
         foto = foto_del_evento(ruta)
+        self._encolar_payload(cid, st, payload, foto)
+
+    def _encolar_payload(self, cid: str, st: SesionCamara, payload: dict | None, foto: bytes | None) -> None:
         if payload is None:
             self._decir("evento_raro", "el motor devolvió un evento que no se entiende: se ignora")
             return
@@ -317,6 +412,7 @@ class Analizador(threading.Thread):
             self._tiempos.popleft()
         ventana = min(30.0, max(1.0, ahora - self._tiempos[0])) if self._tiempos else 30.0
         return {"motor": self.estado_motor, "motivo": self.motivo_motor, "cuadros_por_s": round(len(self._tiempos) / ventana, 1),
+                "motor_preciso": self.estado_preciso, "armas": self.estado_armas, "avisos_arma": self.avisos_arma,
                 "camaras": [{"nombre": nombre, "nivel": st.nivel, "personas": st.personas, "puntaje": st.puntaje, "ms": round(st.ms_promedio()),
                              "analizados": st.analizados, "eventos": st.eventos} for nombre, st in self._nombres()]}
 

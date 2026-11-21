@@ -62,6 +62,9 @@ class Config:
     clips_fps: float = 8.0              # cuadros por segundo del clip
     clips_width: int = 640              # ancho del clip
     clips_max_mb: float = 300.0         # tope de los clips que esperan ser enviados
+    premium_precise_model: str = "yolo11s.pt"   # modelo de personas de las cámaras Premium (más preciso, más lento)
+    premium_weapons_model: str | None = None    # pesos entrenados para armas; sin ellos, solo armas blancas (modelo general)
+    premium_weapons_conf: float = 0.45          # confianza mínima de una posible arma
     server_url: str | None = None       # variable SERVER_URL
     edge_token: str | None = field(default=None, repr=False)    # variable EDGE_TOKEN: nunca se imprime
 
@@ -213,6 +216,17 @@ def cargar(ruta: str | None = None) -> Config:
     cfg.clips_fps = _numero(clips, "fps", cfg.clips_fps, 2, 15)
     cfg.clips_width = int(_numero(clips, "width", cfg.clips_width, 320, 1280))
     cfg.clips_max_mb = _numero(clips, "max_mb", cfg.clips_max_mb, 20, 5000)
+
+    prem = datos.get("premium") or {}
+    if not isinstance(prem, dict):
+        raise ConfigError("'premium' debe ser un diccionario (precise_model, weapons_model, weapons_conf)")
+    for clave in ("precise_model", "weapons_model"):
+        valor = prem.get(clave)
+        if valor is not None and not (isinstance(valor, str) and 0 < len(valor) <= 300):
+            raise ConfigError(f"'premium.{clave}' debe ser una ruta o un nombre de modelo")
+    cfg.premium_precise_model = prem.get("precise_model") or cfg.premium_precise_model
+    cfg.premium_weapons_model = prem.get("weapons_model") or None
+    cfg.premium_weapons_conf = _numero(prem, "weapons_conf", cfg.premium_weapons_conf, 0.2, 0.95)
 
     asignadas = datos.get("assigned") or []
     if not isinstance(asignadas, list) or not all(isinstance(x, str) and x for x in asignadas):
