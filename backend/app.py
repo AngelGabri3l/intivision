@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -270,11 +270,13 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
                 size = os.path.getsize(os.path.join(EVIDENCE_DIR, image))
             except OSError:
                 size = 0
+            dias = int(planes.de_camara(cur, camera_id).get("retention_days") or 7) if camera_id else None
             cur.execute(
                 """INSERT INTO media_files (community_id, user_id, camera_id, event_id, kind,
-                                            storage_key, size_bytes)
-                   VALUES (%s,%s,%s,%s,'image',%s,%s) ON CONFLICT (storage_key) DO NOTHING""",
-                (community, owner, camera_id, event_id, image, size))
+                                            storage_key, size_bytes, expires_at)
+                   VALUES (%s,%s,%s,%s,'image',%s,%s, CASE WHEN %s::int IS NULL THEN NULL ELSE now() + make_interval(days => %s::int) END)
+                   ON CONFLICT (storage_key) DO NOTHING""",
+                (community, owner, camera_id, event_id, image, size, dias, dias or 0))
         if camera_id:
             cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
         if notify:
@@ -293,6 +295,7 @@ _EVENTS_SELECT = """
              WHERE m.event_id = e.id AND m.kind = 'image'
              ORDER BY m.created_at LIMIT 1) AS image,
            (SELECT m.storage_key FROM media_files m WHERE m.event_id = e.id AND m.kind = 'clip' LIMIT 1) AS clip,
+           (c.id IS NOT NULL AND """ + planes.sql_es_premium("c") + """) AS premium,
            e.people_count AS people, e.status,
            c.name AS camera_name,
            COALESCE(cu.full_name, eu.full_name) AS owner_name
@@ -722,6 +725,22 @@ async def ingest(request: Request):
         existente = await asyncio.to_thread(_edge_event_id_of, edge["community_id"], edge_event_id)
         return {"ok": True, "event_id": existente, "duplicate": True}
     return {"ok": True, "event_id": event_id, "duplicate": False}
+
+
+# ---------------------- descarga de evidencia (Plan Premium) ----------------------
+
+@app.get("/events/{event_id}/evidencia.zip")
+def event_evidence_zip(event_id: str, request: Request, user: dict = Depends(auth.current_user)):
+    """La foto, el clip y la ficha del evento con sus huellas SHA-256, para una denuncia. Solo cámaras Premium; queda en audit_log."""
+    if not event_id.isdigit() or len(event_id) > 18:
+        return JSONResponse(status_code=404, content={"error": "No encontrado."})
+    with db.cursor() as cur:
+        estado, contenido, nombre = evidencia_premium.zip_evidencia(
+            cur, user, int(event_id), EVIDENCE_DIR, auth._clean_ip(request.client.host if request.client else None))
+    if estado != 200:
+        return JSONResponse(status_code=estado, content={"error": contenido})
+    return Response(content=contenido, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{nombre}"', "Cache-Control": "no-store"})
 
 
 # ---------------------- clip de video del evento (Plan Premium) ----------------------

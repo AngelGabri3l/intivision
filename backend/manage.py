@@ -23,6 +23,10 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage set-plan --community-slug cuadra-01 --plan premium      (toda la comunidad)
   docker compose exec backend python -m backend.manage set-plan --user correo@ejemplo.com --plan premium --dias 30  (sus cámaras)
   docker compose exec backend python -m backend.manage set-plan --user correo@ejemplo.com --plan base
+  docker compose exec backend python -m backend.manage purgar-evidencias              (simulacro: solo cuenta)
+  docker compose exec backend python -m backend.manage purgar-evidencias --si         (borra fotos y clips vencidos)
+  docker compose exec backend python -m backend.manage reporte-semanal                (simulacro: muestra los mensajes)
+  docker compose exec backend python -m backend.manage reporte-semanal --si           (los envía por Telegram)
 
 La contraseña se pide por teclado (no se ve y no queda en el historial). Para automatizar se puede
 pasar el nombre de una variable de entorno con --password-env.
@@ -37,7 +41,9 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, cameras, db, mapa, planes  # noqa: E402
+from backend import auth, cameras, db, mapa, planes, evidencia_premium  # noqa: E402
+
+EVIDENCE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "events")
 
 
 def ask_password(args, *contexto):
@@ -349,6 +355,50 @@ def list_plans(args):
             print(f"  {r['full_name']} ({r['contacto']}), hasta {hasta}")
 
 
+def purgar_evidencias(args):
+    """Borra las fotos y clips vencidos según el plan (Base 7 días, Premium 90). Los eventos se conservan."""
+    with db.cursor() as cur:
+        n, total = evidencia_premium.purgar(cur, EVIDENCE_DIR, ejecutar=args.si)
+    mb = total / 1e6
+    if args.si:
+        print(f"Se borraron {n} archivo(s) vencido(s) ({mb:.1f} MB). Los eventos siguen en el historial, sin esa foto o clip.")
+    else:
+        print(f"SIMULACRO: hay {n} archivo(s) vencido(s) ({mb:.1f} MB). Para borrarlos agrega --si.")
+
+
+def reporte_semanal(args):
+    """El resumen de los últimos 7 días por Telegram para quienes tienen Premium. Sin --si solo los muestra."""
+    from backend import alerts
+    token = os.environ.get("TELEGRAM_TOKEN") or _token_de_config()
+    if args.si:
+        if not token:
+            sys.exit("Falta el token del bot de Telegram (TELEGRAM_TOKEN o notifier.telegram_token en config.yaml).")
+        alerts.configure(token, EVIDENCE_DIR)
+    enviados = 0
+    with db.cursor() as cur:
+        personas = evidencia_premium.destinatarios_semanales(cur)
+        textos = [(p, evidencia_premium.resumen_semanal(cur, p)) for p in personas]
+    for p, texto in textos:
+        if args.si:
+            enviados += 1 if alerts.notify_user(p["id"], texto) else 0
+        else:
+            print(f"--- {p['full_name']} ---\n{texto}\n")
+    if args.si:
+        print(f"Resumen semanal enviado a {enviados} de {len(textos)} persona(s) con Premium y Telegram vinculado.")
+    else:
+        print(f"SIMULACRO: {len(textos)} persona(s) recibirían el resumen. Para enviarlo agrega --si.")
+
+
+def _token_de_config():
+    try:
+        import yaml
+        ruta = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
+        with open(ruta, encoding="utf-8") as f:
+            return ((yaml.safe_load(f) or {}).get("notifier") or {}).get("telegram_token")
+    except Exception:       # noqa: BLE001
+        return None
+
+
 def set_plan(args):
     """Pone el plan de una comunidad entera o de una vivienda (las cámaras privadas de ese usuario)."""
     if bool(args.community_slug) == bool(args.user):
@@ -442,6 +492,14 @@ def main():
     p.add_argument("--plan", required=True, choices=list(planes.PLANES))
     p.add_argument("--dias", type=int, help="solo con --user y Premium: duración en días (por defecto 30; 0 = sin vencimiento)")
     p.set_defaults(fn=set_plan)
+
+    p = sub.add_parser("purgar-evidencias", help="borra fotos y clips vencidos según el plan (por defecto, simulacro)")
+    p.add_argument("--si", action="store_true", help="borrar de verdad")
+    p.set_defaults(fn=purgar_evidencias)
+
+    p = sub.add_parser("reporte-semanal", help="resumen de 7 días por Telegram para quienes tienen Premium (por defecto, simulacro)")
+    p.add_argument("--si", action="store_true", help="enviar de verdad")
+    p.set_defaults(fn=reporte_semanal)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")

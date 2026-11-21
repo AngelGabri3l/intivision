@@ -145,7 +145,14 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}{zip_link(r)}</div></div>')
+
+
+def zip_link(r) -> str:
+    """Descarga de la evidencia con huellas (Plan Premium)."""
+    if not r.get("premium") or not r.get("id"):
+        return ""
+    return f'<a class="evento__zip" href="/events/{esc(r["id"])}/evidencia.zip" download>Descargar evidencia (ZIP)</a>'
 
 
 def video_block(r) -> str:
