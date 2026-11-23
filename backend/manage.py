@@ -27,6 +27,8 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage purgar-evidencias --si         (borra fotos y clips vencidos)
   docker compose exec backend python -m backend.manage reporte-semanal                (simulacro: muestra los mensajes)
   docker compose exec backend python -m backend.manage reporte-semanal --si           (los envía por Telegram)
+  docker compose exec backend python -m backend.manage procesar-suscripciones         (renovaciones, bajadas y bajas que ya tocan)
+  docker compose exec backend python -m backend.manage vencer-periodo --user correo@ejemplo.com   (SOLO DEMO: termina su período ya)
 
 La contraseña se pide por teclado (no se ve y no queda en el historial). Para automatizar se puede
 pasar el nombre de una variable de entorno con --password-env.
@@ -41,7 +43,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, cameras, db, mapa, planes, evidencia_premium  # noqa: E402
+from backend import auth, cameras, db, mapa, planes, evidencia_premium, suscripciones  # noqa: E402
 
 EVIDENCE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "events")
 
@@ -352,7 +354,7 @@ def list_plans(args):
         print("\nPremium por vivienda:" + ("" if filas else " nadie"))
         for r in filas:
             hasta = r["current_period_end"].astimezone().strftime("%d/%m/%Y") if r["current_period_end"] else "sin vencimiento"
-            print(f"  {r['full_name']} ({r['contacto']}), hasta {hasta}")
+            print(f"  {r['full_name']} ({r['contacto']}), " + (f"hasta {hasta}" if r["current_period_end"] else hasta))
 
 
 def purgar_evidencias(args):
@@ -397,6 +399,36 @@ def _token_de_config():
             return ((yaml.safe_load(f) or {}).get("notifier") or {}).get("telegram_token")
     except Exception:       # noqa: BLE001
         return None
+
+
+def procesar_suscripciones(args):
+    """Aplica ya lo que toca al final de cada período (el servidor también lo hace solo cada 10 minutos)."""
+    from backend import alerts
+    token = os.environ.get("TELEGRAM_TOKEN") or _token_de_config()
+    if token:
+        alerts.configure(token, EVIDENCE_DIR)
+    with db.cursor() as cur:
+        avisos = suscripciones.procesar_vencimientos(cur)
+    suscripciones.enviar_avisos(avisos)
+    print(f"Listo: {len(avisos)} aviso(s)." + ("".join(f"\n  · {t}" for _, t in avisos)))
+
+
+def vencer_periodo(args):
+    """SOLO PARA DEMOSTRAR: adelanta el fin del período (y el reintento) a este momento y procesa los vencimientos."""
+    if bool(args.user) == bool(args.community_slug):
+        sys.exit("Indica --user o --community-slug, uno de los dos.")
+    with db.cursor() as cur:
+        if args.user:
+            u = find_user(cur, args.user)
+            cur.execute("""UPDATE subscriptions SET current_period_end = now() - interval '1 second', next_retry_at = now() - interval '1 second'
+                           WHERE user_id = %s AND status IN ('active', 'trialing', 'past_due')""", (u["id"],))
+        else:
+            cur.execute("""UPDATE community_subscriptions SET current_period_end = now() - interval '1 second', next_retry_at = now() - interval '1 second'
+                           WHERE community_id = %s AND status IN ('active', 'past_due')""", (community_id(cur, args.community_slug),))
+        n = cur.rowcount
+    if not n:
+        sys.exit("No hay una suscripción vigente que vencer.")
+    procesar_suscripciones(args)
 
 
 def set_plan(args):
@@ -500,6 +532,14 @@ def main():
     p = sub.add_parser("reporte-semanal", help="resumen de 7 días por Telegram para quienes tienen Premium (por defecto, simulacro)")
     p.add_argument("--si", action="store_true", help="enviar de verdad")
     p.set_defaults(fn=reporte_semanal)
+
+    p = sub.add_parser("procesar-suscripciones", help="renovaciones, bajadas a Base y bajas que ya tocan")
+    p.set_defaults(fn=procesar_suscripciones)
+
+    p = sub.add_parser("vencer-periodo", help="SOLO DEMO: termina ya el período de una vivienda o de una comunidad")
+    p.add_argument("--user")
+    p.add_argument("--community-slug")
+    p.set_defaults(fn=vencer_periodo)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")

@@ -531,8 +531,28 @@ def plan_pagos(est) -> str:
 
 
 # Ganchos que completan los PR de pagos y de cambios de plan
-def plan_boton_base(est) -> str: return ""
-def plan_baja(est) -> str: return ""
+def plan_boton_base(est) -> str:
+    v = est["vivienda"]
+    if not est["vivienda_premium"]:
+        return ""
+    if v["scheduled_action"] in ("bajar_a_base", "dar_de_baja"):
+        return ('<form method="post" action="/plan/reactivar"><button class="btn" type="submit">Seguir con Premium</button></form>')
+    return ('<form method="post" action="/plan/cancelar"><button class="btn btn--texto" type="submit">Bajar a Base al final del período</button></form>'
+            f'<p class="plan-tarjeta__nota">Sigues con Premium hasta el {esc(suscripciones_fecha(v["current_period_end"]))}. No hay reembolso del mes en curso.</p>')
+
+
+def plan_baja(est) -> str:
+    return ('<section class="seccion" aria-labelledby="titulo-baja"><div class="contenedor"><div class="historial__cabecera">'
+            '<h2 class="historial__titulo" id="titulo-baja"><span class="pixel">Darte de baja</span></h2></div>'
+            '<div class="zona-peligro"><p>Si dejas INTIVISION:</p><ul>'
+            '<li>Tus cámaras privadas se desasignan y quedan en «Equipos y cámaras» para que el administrador decida qué hacer.</li>'
+            '<li>Dejas de pertenecer a la comunidad: se cierra tu cuenta y todas tus sesiones.</li>'
+            '<li>Se desvincula tu Telegram y se borran tus tarjetas guardadas.</li>'
+            '<li>Tus eventos se conservan el tiempo de retención de tu plan y luego se borran.</li>'
+            '<li>Si tienes Premium pagado, la baja ocurre al final de ese período y puedes deshacerla hasta entonces.</li></ul>'
+            '<form method="post" action="/plan/baja" class="estado-plan"><label for="confirmacion">Escribe <strong>DAR DE BAJA</strong> para confirmar</label>'
+            '<input type="text" id="confirmacion" name="confirmacion" autocomplete="off" required>'
+            '<button class="btn btn--peligro" type="submit">Darme de baja</button></form></div></div></section>')
 
 
 def plan_boton_premium(est) -> str:
@@ -545,8 +565,14 @@ def plan_boton_premium(est) -> str:
 
 
 def plan_boton_comunidad(est) -> str:
-    if est["comunidad"]:
-        return ""
+    c = est["comunidad"]
+    if c:
+        if c["cancel_at_period_end"]:
+            return (f'<p class="plan-tarjeta__nota">Termina el {esc(suscripciones_fecha(c["current_period_end"]))}.</p>'
+                    '<form method="post" action="/plan/comunidad/reactivar"><button class="btn" type="submit">Seguir con Premium</button></form>')
+        return (f'<p class="plan-tarjeta__nota">Activo · se renueva el {esc(suscripciones_fecha(c["current_period_end"]))}'
+                + (f' · {esc(c["card_brand"])} •••• {esc(c["card_last4"])}' if c.get("card_last4") else "") + '</p>'
+                '<form method="post" action="/plan/comunidad/cancelar"><button class="btn btn--texto" type="submit">Bajar a Base al final del período</button></form>')
     return ('<form method="post" action="/plan/checkout"><input type="hidden" name="scope" value="comunidad">'
             '<button class="btn" type="submit">Activar Premium para la comunidad</button></form>')
 

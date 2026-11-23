@@ -417,6 +417,7 @@ LOGIN_NOTICES = {
     "expirada": ("Tu sesión terminó por inactividad. Inicia sesión de nuevo.", "alerta"),
     "cerrada": ("Tu sesión se cerró desde otro dispositivo. Inicia sesión de nuevo.", "alerta"),
     "todas": ("Cerraste sesión en todos tus dispositivos.", "ok"),
+    "baja": ("Te diste de baja de INTIVISION: tu cuenta se cerró y tus cámaras quedaron sin asignar. Gracias por usar el servicio.", "ok"),
 }
 
 
@@ -514,11 +515,17 @@ def startup():
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
     alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+    if os.environ.get("SUSCRIPCIONES_CICLO", "1") != "0":
+        threading.Thread(target=suscripciones.ciclo_forever, args=(_parar_suscripciones,), name="suscripciones", daemon=True).start()
+
+
+_parar_suscripciones = threading.Event()
 
 
 @app.on_event("shutdown")
 def shutdown():
     alerts.stop()
+    _parar_suscripciones.set()
 
 
 @app.get("/health")
@@ -1270,6 +1277,14 @@ PLAN_NOTICES = {
     "prohibido": ("error", "Solo el administrador puede pagar el plan de la comunidad."),
     "sesion": ("alerta", "La sesión de pago venció o ya se usó. Empieza de nuevo."),
     "no_autorizado": ("error", "El pago no se autorizó en tu banco. No se cobró nada."),
+    "cancelado": ("ok", "Listo: al final del período vuelves al Plan Base. Hasta entonces sigues con Premium."),
+    "reactivado": ("ok", "Listo: sigues con el Plan Premium y se renovará normalmente."),
+    "comunidad_cancelado": ("ok", "Listo: al final del período la comunidad vuelve al Plan Base."),
+    "comunidad_reactivado": ("ok", "Listo: la comunidad sigue con el Plan Premium."),
+    "baja_programada": ("alerta", "Tu baja quedó programada para el final del período pagado. Puedes deshacerla hasta entonces."),
+    "confirmacion": ("error", "Para darte de baja escribe exactamente DAR DE BAJA."),
+    "unico_admin": ("error", "Eres el único administrador de la comunidad: antes de irte, otra persona debe ser administradora."),
+    "sin_cambios": ("info", "No había nada que cambiar."),
 }
 _SIN_CACHE = {"Cache-Control": "no-store"}
 
@@ -1327,6 +1342,48 @@ def _pago_3ds(cur, user, pid):
     cur.execute("SELECT * FROM payments WHERE id = %s AND user_id = %s AND status = 'requires_action'", (pid, user["id"]))
     fila = cur.fetchone()
     return dict(fila) if fila else None
+
+
+@app.post("/plan/cancelar")
+def plan_cancelar(user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        ok = suscripciones.cancelar_premium(cur, user)
+    return RedirectResponse(f"/plan?m={'cancelado' if ok else 'sin_cambios'}", status_code=303)
+
+
+@app.post("/plan/reactivar")
+def plan_reactivar(user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        ok = suscripciones.reactivar(cur, user)
+    return RedirectResponse(f"/plan?m={'reactivado' if ok else 'sin_cambios'}", status_code=303)
+
+
+@app.post("/plan/comunidad/{accion}")
+def plan_comunidad(accion: str, user: dict = Depends(auth.current_user)):
+    if accion not in ("cancelar", "reactivar") or user["role"] != "community_admin":
+        return RedirectResponse("/plan?m=prohibido", status_code=303)
+    with db.cursor() as cur:
+        ok = suscripciones.cancelar_comunidad(cur, user, cancelar=accion == "cancelar")
+    destino = "comunidad_cancelado" if accion == "cancelar" else "comunidad_reactivado"
+    return RedirectResponse(f"/plan?m={destino if ok else 'sin_cambios'}", status_code=303)
+
+
+@app.post("/plan/baja")
+def plan_baja(request: Request, confirmacion: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Dejar el servicio: con Premium pagado, al final del período; si no, en el acto (y se cierra la sesión)."""
+    if confirmacion.strip().upper() != "DAR DE BAJA":
+        return RedirectResponse("/plan?m=confirmacion", status_code=303)
+    try:
+        with db.cursor() as cur:
+            cuando, info = suscripciones.dar_de_baja(cur, user)
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+    if cuando == "programada":
+        return RedirectResponse("/plan?m=baja_programada", status_code=303)
+    threading.Thread(target=suscripciones.enviar_avisos, args=(suscripciones.avisos_de_baja(info),), daemon=True).start()
+    response = RedirectResponse("/login?m=baja", status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return response
 
 
 @app.get("/pagos/3ds/{pid}", response_class=HTMLResponse)
