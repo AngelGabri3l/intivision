@@ -1264,7 +1264,122 @@ def _alerts_response(request, user, notice=None, link=None, status=200):
 
 # ---------------------- Mi plan ----------------------
 
-PLAN_NOTICES = {}
+PLAN_NOTICES = {
+    "pagado": ("ok", "Pago recibido. Ya tienes el Plan Premium: tu mini PC lo aplica en unos 30 segundos."),
+    "ya_premium": ("info", "Ya tienes el Plan Premium."),
+    "prohibido": ("error", "Solo el administrador puede pagar el plan de la comunidad."),
+    "sesion": ("alerta", "La sesión de pago venció o ya se usó. Empieza de nuevo."),
+    "no_autorizado": ("error", "El pago no se autorizó en tu banco. No se cobró nada."),
+}
+_SIN_CACHE = {"Cache-Control": "no-store"}
+
+
+@app.post("/plan/checkout")
+def plan_checkout(scope: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Abre una sesión de pago (como Stripe Checkout) y lleva a la página de pago."""
+    try:
+        with db.cursor() as cur:
+            sid = suscripciones.crear_sesion(cur, user, scope)
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+    return RedirectResponse(f"/pagos/checkout/{sid}", status_code=303)
+
+
+@app.get("/pagos/checkout/{sid}", response_class=HTMLResponse)
+def checkout_page(sid: str, user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        s = suscripciones.sesion(cur, user, sid)
+    if s is None or s["status"] != "open":
+        return RedirectResponse("/plan?m=sesion", status_code=303)
+    return HTMLResponse(pages.render_checkout(s), headers=_SIN_CACHE)
+
+
+@app.post("/pagos/checkout/{sid}", response_class=HTMLResponse)
+def checkout_pay(sid: str, numero: str = Form(""), vence: str = Form(""), cvc: str = Form(""), nombre: str = Form(""),
+                 user: dict = Depends(auth.current_user)):
+    """Procesa la tarjeta. El número nunca se guarda ni se registra; un rechazo queda en el historial de pagos."""
+    error = resultado = None
+    with db.cursor() as cur:
+        try:
+            resultado = suscripciones.pagar(cur, user, sid, numero, vence, cvc, nombre)
+        except suscripciones.ErrorPago as e:
+            error = e
+        s = suscripciones.sesion(cur, user, sid)
+    if error is not None:
+        if error.codigo == "sesion" or s is None:
+            return RedirectResponse("/plan?m=sesion", status_code=303)
+        return HTMLResponse(pages.render_checkout(s, error=error.mensaje, nombre=nombre[:80]), status_code=402 if error.codigo != "formulario" else 422,
+                            headers=_SIN_CACHE)
+    tipo, dato = resultado
+    if tipo == "3ds":
+        return RedirectResponse(f"/pagos/3ds/{dato}", status_code=303)
+    _avisar_pago(user, dato)
+    return RedirectResponse("/plan?m=pagado", status_code=303)
+
+
+def _avisar_pago(user, pago):
+    texto = (f"✅ Pago recibido: {suscripciones.soles(pago['amount_cents'])} · comprobante {pago['receipt_number']}. "
+             "Ya tienes el Plan Premium (clip de video, posibles armas y más).")
+    threading.Thread(target=alerts.notify_user, args=(user["id"], texto), daemon=True).start()
+
+
+def _pago_3ds(cur, user, pid):
+    cur.execute("SELECT * FROM payments WHERE id = %s AND user_id = %s AND status = 'requires_action'", (pid, user["id"]))
+    fila = cur.fetchone()
+    return dict(fila) if fila else None
+
+
+@app.get("/pagos/3ds/{pid}", response_class=HTMLResponse)
+def tres_ds_page(pid: str, user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        pago = _pago_3ds(cur, user, pid)
+    if pago is None:
+        return RedirectResponse("/plan?m=sesion", status_code=303)
+    return HTMLResponse(pages.render_3ds(pid, pago), headers=_SIN_CACHE)
+
+
+@app.post("/pagos/3ds/{pid}")
+def tres_ds_decide(pid: str, decision: str = Form(""), user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        pago = _pago_3ds(cur, user, pid)
+        if pago is None:
+            return RedirectResponse("/plan?m=sesion", status_code=303)
+        if decision == "autorizar":
+            confirmado = suscripciones.confirmar(cur, pid)
+        else:
+            suscripciones.fallar(cur, pid, "authentication_failed", "No se autorizó el pago en el banco.")
+            confirmado = None
+    if confirmado is None:
+        return RedirectResponse("/plan?m=no_autorizado", status_code=303)
+    _avisar_pago(user, confirmado)
+    return RedirectResponse("/plan?m=pagado", status_code=303)
+
+
+@app.post("/pagos/webhook")
+async def pagos_webhook(request: Request):
+    """Eventos de la pasarela (como los webhooks de Stripe): firma HMAC en «Pasarela-Signature», cada evento se aplica una sola vez."""
+    cuerpo = await _read_limited(request, 65_536)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "Evento demasiado grande."})
+    try:
+        def aplicar():
+            with db.cursor() as cur:
+                return suscripciones.procesar_evento(cur, cuerpo, request.headers.get("pasarela-signature", ""))
+        resultado = await asyncio.to_thread(aplicar)
+    except suscripciones.ErrorPago:
+        return JSONResponse(status_code=400, content={"error": "Firma no válida."})
+    except (ValueError, KeyError):
+        return JSONResponse(status_code=400, content={"error": "Evento no válido."})
+    return {"ok": True, "resultado": resultado}
+
+
+@app.get("/pagos/comprobante/{pid}", response_class=HTMLResponse)
+def comprobante_page(pid: str, user: dict = Depends(auth.current_user)):
+    with db.cursor() as cur:
+        c = suscripciones.comprobante(cur, user, pid)
+    if c is None:
+        return JSONResponse(status_code=404, content={"error": "No encontrado."})
+    return HTMLResponse(pages.render_comprobante(c), headers=_SIN_CACHE)
 
 
 def _plan_response(request, user, notice=None, status=200):

@@ -532,10 +532,92 @@ def plan_pagos(est) -> str:
 
 # Ganchos que completan los PR de pagos y de cambios de plan
 def plan_boton_base(est) -> str: return ""
-def plan_boton_premium(est) -> str: return ""
-def plan_boton_comunidad(est) -> str: return ""
-def plan_comprobante_link(p) -> str: return ""
 def plan_baja(est) -> str: return ""
+
+
+def plan_boton_premium(est) -> str:
+    if est["vivienda_premium"]:
+        return ""
+    if est["comunidad_premium"]:
+        return '<p class="plan-tarjeta__nota">Ya lo tienes por el plan de tu comunidad.</p>'
+    return ('<form method="post" action="/plan/checkout"><input type="hidden" name="scope" value="vivienda">'
+            '<button class="btn" type="submit">Pasar a Premium</button></form>')
+
+
+def plan_boton_comunidad(est) -> str:
+    if est["comunidad"]:
+        return ""
+    return ('<form method="post" action="/plan/checkout"><input type="hidden" name="scope" value="comunidad">'
+            '<button class="btn" type="submit">Activar Premium para la comunidad</button></form>')
+
+
+def plan_comprobante_link(p) -> str:
+    return f'<a href="/pagos/comprobante/{esc(p["id"])}">Comprobante {esc(p["receipt_number"] or "")}</a>' if p.get("receipt_number") else ""
+
+
+# ------------------------------------------------------------------ pasarela simulada (páginas propias, como Stripe Checkout)
+
+_PRUEBA = ('<details class="tarjetas-prueba"><summary>Tarjetas de prueba</summary><p>'
+           '<code>4242 4242 4242 4242</code> pago aprobado · <code>4000 0027 6000 3184</code> pide autenticación del banco · '
+           '<code>4000 0000 0000 0002</code> rechazada · <code>4000 0000 0000 9995</code> sin fondos · '
+           '<code>4000 0000 0000 0341</code> aprobada, pero fallará la renovación. '
+           'Cualquier fecha futura, cualquier CVC de 3 dígitos y cualquier nombre.</p></details>')
+
+
+def _resumen(s, alcance) -> str:
+    total = int(s["amount_cents"]); base = round(total / 1.18)
+    return (f'<section class="resumen"><a href="/plan">← Volver a Mi plan</a><p class="resumen__producto">INTIVISION · Plan Premium {alcance}</p>'
+            f'<p class="resumen__monto">{esc(suscripciones_soles(total))}</p><p class="resumen__detalle">al mes · se renueva cada 30 días · cancela cuando quieras</p>'
+            f'<div class="lineas"><div><span>Subtotal</span><span>{esc(suscripciones_soles(base))}</span></div>'
+            f'<div><span>IGV (18 %)</span><span>{esc(suscripciones_soles(total - base))}</span></div>'
+            f'<div><strong>Total hoy</strong><strong>{esc(suscripciones_soles(total))}</strong></div></div></section>')
+
+
+def render_checkout(s, error=None, nombre="") -> str:
+    alcance = "de la comunidad" if s["scope"] == "comunidad" else "de tu vivienda"
+    formulario = (f'<section class="caja"><h2>Pagar con tarjeta</h2>'
+                  + (f'<p class="error" role="alert">{esc(error)}</p>' if error else "") +
+                  f'<form method="post" action="/pagos/checkout/{esc(s["id"])}" autocomplete="off" class="caja" style="padding:0;border:0;box-shadow:none">'
+                  '<label>Número de tarjeta<input name="numero" inputmode="numeric" autocomplete="cc-number" placeholder="1234 1234 1234 1234" required maxlength="23"></label>'
+                  '<div class="fila"><label>Vence<input name="vence" placeholder="MM/AA" autocomplete="cc-exp" required maxlength="7"></label>'
+                  '<label>CVC<input name="cvc" inputmode="numeric" autocomplete="cc-csc" placeholder="123" required maxlength="4"></label></div>'
+                  f'<label>Nombre en la tarjeta<input name="nombre" autocomplete="cc-name" required maxlength="80" value="{esc(nombre)}"></label>'
+                  f'<button class="boton" type="submit">Pagar {esc(suscripciones_soles(s["amount_cents"]))}</button></form>'
+                  '<p class="nota">Tu tarjeta se guarda como un token para la renovación mensual: solo vemos la marca y los últimos 4 dígitos.</p>'
+                  + _PRUEBA + '</section>')
+    return fill(read_template("pago.html"), titulo="Pagar Premium", contenido=_resumen(s, alcance) + formulario)
+
+
+def render_3ds(pid, pago) -> str:
+    caja = (f'<section class="resumen"><p class="resumen__producto">Banco emisor (simulado) · 3-D Secure</p>'
+            f'<p class="resumen__monto">{esc(suscripciones_soles(pago["amount_cents"]))}</p>'
+            f'<p class="resumen__detalle">Tarjeta {esc(pago["card_brand"])} •••• {esc(pago["card_last4"])} · comercio: INTIVISION</p></section>'
+            f'<section class="caja"><h2>Confirma tu compra</h2><p class="nota">Tu banco pide que confirmes este pago. En la vida real llegaría '
+            f'un código o una notificación a tu celular.</p>'
+            f'<form method="post" action="/pagos/3ds/{esc(pid)}"><input type="hidden" name="decision" value="autorizar">'
+            f'<button class="boton" type="submit" style="width:100%">Autorizar el pago</button></form>'
+            f'<form method="post" action="/pagos/3ds/{esc(pid)}"><input type="hidden" name="decision" value="rechazar">'
+            f'<button class="boton boton--secundario" type="submit" style="width:100%">No reconozco este pago</button></form></section>')
+    return fill(read_template("pago.html"), titulo="Autenticación del banco", contenido=caja)
+
+
+def render_comprobante(c) -> str:
+    total = int(c["amount_cents"]); base = round(total / 1.18)
+    concepto = "Plan Premium de la comunidad" if c["scope"] == "comunidad" else "Plan Premium de la vivienda"
+    caja = (f'<section class="caja" style="grid-column: 1 / -1"><h2>Boleta de venta electrónica {esc(c["receipt_number"])}</h2>'
+            f'<p class="nota">Documento de PRUEBA emitido por la pasarela simulada; no tiene valor tributario.</p>'
+            f'<table><tr><td>Emisor</td><td>INTIVISION (proyecto académico)</td></tr>'
+            f'<tr><td>Cliente</td><td>{esc(c["full_name"])} · {esc(c["contacto"])}</td></tr>'
+            f'<tr><td>Comunidad</td><td>{esc(c["comunidad"])}</td></tr>'
+            f'<tr><td>Fecha</td><td>{esc(suscripciones_fecha(c["paid_at"]))}</td></tr>'
+            f'<tr><td>Concepto</td><td>{concepto} · {"renovación" if c["kind"] == "renovacion" else "alta"} · 30 días</td></tr>'
+            f'<tr><td>Medio de pago</td><td>{esc(c["card_brand"])} •••• {esc(c["card_last4"])}</td></tr>'
+            f'<tr><td>Operación</td><td>{esc(c["id"])}</td></tr>'
+            f'<tr><td>Valor de venta</td><td>{esc(suscripciones_soles(base))}</td></tr>'
+            f'<tr><td>IGV (18 %)</td><td>{esc(suscripciones_soles(total - base))}</td></tr>'
+            f'<tr><td><strong>Importe total</strong></td><td><strong>{esc(suscripciones_soles(total))}</strong></td></tr></table>'
+            f'<p class="no-imprimir"><a href="/plan">← Volver a Mi plan</a></p></section>')
+    return fill(read_template("pago.html"), titulo=f"Comprobante {c['receipt_number']}", contenido=caja)
 
 
 def render_plan(user, est, notice=None) -> str:

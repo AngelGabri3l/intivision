@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es-PE">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex, nofollow">
+<title>{titulo} · INTIVISION</title>
+<link rel="icon" href="data:,">
+<style>
+:root { --fondo: #f6f7fb; --tarjeta: #ffffff; --texto: #1a1f36; --suave: #697386; --borde: #e3e8ee; --marca: #635bff; --marca-texto: #ffffff;
+        --error: #df1b41; --ok: #0e9f6e; --aviso: #fff4e5; --aviso-texto: #8a4b00; }
+@media (prefers-color-scheme: dark) { :root { --fondo: #0f1222; --tarjeta: #171b33; --texto: #e6e8f2; --suave: #a3acc2; --borde: #2a3052;
+        --aviso: #3a2a10; --aviso-texto: #ffd59a; } }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--fondo); color: var(--texto); }
+.prueba { background: var(--aviso); color: var(--aviso-texto); text-align: center; font-size: 13px; padding: 8px 12px; }
+.marco { max-width: 960px; margin: 0 auto; padding: 32px 16px; display: grid; gap: 32px; grid-template-columns: 1fr; }
+@media (min-width: 860px) { .marco { grid-template-columns: 1fr 1fr; padding-top: 56px; } }
+.resumen { display: grid; gap: 12px; align-content: start; }
+.resumen a { color: var(--suave); text-decoration: none; font-size: 14px; }
+.resumen__producto { color: var(--suave); margin: 0; }
+.resumen__monto { font-size: 36px; font-weight: 600; margin: 0; }
+.resumen__detalle { color: var(--suave); font-size: 14px; margin: 0; }
+.lineas { border-top: 1px solid var(--borde); padding-top: 12px; display: grid; gap: 8px; font-size: 14px; }
+.lineas div { display: flex; justify-content: space-between; }
+.caja { background: var(--tarjeta); border: 1px solid var(--borde); border-radius: 12px; padding: 24px; display: grid; gap: 16px;
+        box-shadow: 0 6px 24px rgba(0,0,0,.06); }
+.caja h2 { margin: 0; font-size: 18px; }
+label { display: grid; gap: 6px; font-size: 14px; color: var(--suave); }
+input { min-height: 44px; padding: 0 12px; font-size: 16px; border: 1px solid var(--borde); border-radius: 8px; background: transparent; color: var(--texto); }
+input:focus { outline: 2px solid var(--marca); outline-offset: 1px; }
+.fila { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.boton { min-height: 48px; border: 0; border-radius: 8px; background: var(--marca); color: var(--marca-texto); font-size: 16px; font-weight: 600; cursor: pointer; }
+.boton--secundario { background: transparent; color: var(--texto); border: 1px solid var(--borde); }
+.error { color: var(--error); font-size: 14px; margin: 0; }
+.ok { color: var(--ok); }
+.nota { color: var(--suave); font-size: 13px; margin: 0; }
+.tarjetas-prueba { font-size: 13px; color: var(--suave); }
+.tarjetas-prueba code { color: var(--texto); }
+.tarjetas-prueba summary { cursor: pointer; min-height: 32px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+td { padding: 8px 0; border-bottom: 1px solid var(--borde); }
+td:last-child { text-align: right; }
+@media print { .prueba, .no-imprimir { display: none; } body { background: #fff; color: #000; } }
+</style>
+</head>
+<body>
+<div class="prueba">Modo de prueba · pasarela de pagos simulada · no se cobra dinero real</div>
+<main class="marco">
+{contenido}
+</main>
+</body>
+</html>
