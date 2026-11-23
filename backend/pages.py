@@ -10,6 +10,7 @@ import re
 from urllib.parse import urlencode
 
 from backend import alerts, auth, cameras, hitl
+from backend.suscripciones import fecha as suscripciones_fecha, soles as suscripciones_soles
 
 log = logging.getLogger("pages")
 
@@ -97,7 +98,8 @@ def nav(user, active) -> str:
             f'<div class="cabecera__usuario"><span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
             '<form method="post" action="/logout"><button class="salir" type="submit">Cerrar sesión</button></form></div></div>'
             '<nav aria-label="Principal" class="cabecera__pestanas"><div class="contenedor cabecera__tabs">'
-            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas") + admin_links(user, active)
+            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas") + pestana("/plan", "Mi plan", "plan")
+            + admin_links(user, active)
             + '</div></nav>')
 
 
@@ -451,3 +453,93 @@ def render_alerts(user, channel, configured, recent, notice=None, link=None) -> 
                      "Elige desde qué nivel quieres que te avisemos."),
         aviso=alert_block(notice[1], notice[0]) if notice else "", panel=panel, seguridad=security_block(user),
         total=esc(count_text(len(recent), "aviso", "avisos")) if recent else "", avisos=avisos)
+
+
+# ------------------------------------------------------------------ Mi plan
+
+def _beneficios(p, comunidad=False) -> str:
+    if p.get("code") == "premium":
+        items = [f"Clip de video de {p.get('clip_seconds') or 20} s en Telegram" if p.get("highlight_clips") else "",
+                 "Detección de posibles armas" if p.get("weapon_detection") else "",
+                 "Detección más precisa" if p.get("high_precision") else "",
+                 f"Fotos y clips por {p.get('retention_days')} días",
+                 "Resumen semanal por Telegram" if p.get("weekly_report") else "",
+                 "Descarga de evidencia con huella SHA-256" if p.get("evidence_export") else ""]
+        items.insert(0, "Todas las cámaras de la comunidad" if comunidad else "Tus cámaras privadas")
+    else:
+        items = ["Detección de personas y posturas de riesgo", "Alertas con foto por Telegram", "Revisión del administrador",
+                 f"Fotos por {p.get('retention_days') or 7} días"]
+    return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items if i) + "</ul>"
+
+
+def plan_estado(est) -> str:
+    """El recuadro de arriba: qué plan tiene hoy esta persona y qué va a pasar."""
+    v = est["vivienda"]
+    if est["vivienda_premium"]:
+        lineas = [f'<strong>Premium de tu vivienda</strong>',
+                  f'<span>{esc(suscripciones_soles(est["premium"]["price_pen_cents"]))} al mes'
+                  + (f' · tarjeta {esc(v["card_brand"])} •••• {esc(v["card_last4"])}' if v and v.get("card_last4") else "") + '</span>']
+        if v["scheduled_action"] == "dar_de_baja":
+            lineas.append(f'<span>Diste de baja el servicio: tu cuenta se cierra el {esc(suscripciones_fecha(v["current_period_end"]))}.</span>')
+        elif v["cancel_at_period_end"]:
+            lineas.append(f'<span>Vuelves al Plan Base el {esc(suscripciones_fecha(v["current_period_end"]))}. Hasta entonces sigues con Premium.</span>')
+        elif v["status"] == "past_due":
+            lineas.append(f'<span class="estado-pago--falla">No pudimos cobrar la renovación. Reintentaremos; si no se cobra, volverás al Plan Base.</span>')
+        else:
+            lineas.append(f'<span>Se renueva el {esc(suscripciones_fecha(v["current_period_end"]))}.</span>')
+    elif est["comunidad_premium"]:
+        lineas = ['<strong>Premium de tu comunidad</strong>', '<span>Tu comunidad tiene el Plan Premium: tus cámaras lo incluyen.</span>']
+    else:
+        lineas = ['<strong>Plan Base</strong>', '<span>Incluido en la cuota de tu comunidad.</span>']
+    return '<div class="estado-plan">' + "".join(lineas) + "</div>"
+
+
+def plan_tarjetas(est) -> str:
+    base, prem = est["base"], est["premium"]
+    actual_base = not est["vivienda_premium"] and not est["comunidad_premium"]
+    tarjetas = [
+        f'<article class="plan-tarjeta{" plan-tarjeta--actual" if actual_base else ""}"><h3 class="plan-tarjeta__nombre">Plan Base</h3>'
+        f'<p class="plan-tarjeta__precio">{esc(suscripciones_soles(base.get("price_pen_cents")))} <small>por vivienda al mes</small></p>'
+        f'<p class="plan-tarjeta__nota">Lo cobra tu junta vecinal en la cuota de la comunidad.</p>{_beneficios(base)}{plan_boton_base(est)}</article>',
+        f'<article class="plan-tarjeta{" plan-tarjeta--actual" if est["vivienda_premium"] else ""}"><h3 class="plan-tarjeta__nombre">Premium · vivienda</h3>'
+        f'<p class="plan-tarjeta__precio">{esc(suscripciones_soles(prem.get("price_pen_cents")))} <small>al mes</small></p>'
+        f'<p class="plan-tarjeta__nota">Lo pagas tú; vale para tus cámaras privadas. Cancela cuando quieras.</p>'
+        f'{_beneficios(prem)}{plan_boton_premium(est)}</article>']
+    if est["es_admin"]:
+        tarjetas.append(
+            f'<article class="plan-tarjeta{" plan-tarjeta--actual" if est["comunidad_premium"] else ""}"><h3 class="plan-tarjeta__nombre">Premium · comunidad</h3>'
+            f'<p class="plan-tarjeta__precio">{esc(suscripciones_soles(prem.get("community_price_pen_cents")))} <small>al mes</small></p>'
+            f'<p class="plan-tarjeta__nota">Lo paga la junta; vale para todas las cámaras de la comunidad.</p>'
+            f'{_beneficios(prem, comunidad=True)}{plan_boton_comunidad(est)}</article>')
+    return "".join(tarjetas)
+
+
+def plan_pagos(est) -> str:
+    if not est["pagos"]:
+        return '<div class="vacio"><p class="vacio__titulo">Aún no hay pagos</p><p class="vacio__texto">Aquí verás cada cobro y su comprobante.</p></div>'
+    filas = []
+    for p in est["pagos"]:
+        ok = p["status"] == "succeeded"
+        estado = "Pagado" if ok else ("Rechazado" if p["status"] == "failed" else "Pendiente")
+        detalle = esc(p["failure_message"] or "") if not ok else plan_comprobante_link(p)
+        filas.append(f'<tr><td>{esc(suscripciones_fecha(p["created_at"]))}</td>'
+                     f'<td>{"Premium comunidad" if p["scope"] == "comunidad" else "Premium vivienda"} · {"renovación" if p["kind"] == "renovacion" else "alta"}</td>'
+                     f'<td>{esc(suscripciones_soles(p["amount_cents"]))}</td><td>{esc(p["card_brand"] or "")} •••• {esc(p["card_last4"] or "")}</td>'
+                     f'<td class="{"estado-pago--ok" if ok else "estado-pago--falla"}">{estado}</td><td>{detalle}</td></tr>')
+    return ('<div class="pagos__tabla"><table class="pagos"><thead><tr><th>Fecha</th><th>Concepto</th><th>Monto</th><th>Tarjeta</th>'
+            '<th>Estado</th><th></th></tr></thead><tbody>' + "".join(filas) + '</tbody></table></div>')
+
+
+# Ganchos que completan los PR de pagos y de cambios de plan
+def plan_boton_base(est) -> str: return ""
+def plan_boton_premium(est) -> str: return ""
+def plan_boton_comunidad(est) -> str: return ""
+def plan_comprobante_link(p) -> str: return ""
+def plan_baja(est) -> str: return ""
+
+
+def render_plan(user, est, notice=None) -> str:
+    return fill(read_template("plan.html"), nav=nav(user, "plan"),
+                descripcion="Tu plan, lo que incluye y tus pagos. El Plan Premium suma clip de video, posibles armas y más.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", estado=plan_estado(est), planes=plan_tarjetas(est),
+                pagos=plan_pagos(est), baja=plan_baja(est))

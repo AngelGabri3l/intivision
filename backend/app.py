@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1260,6 +1260,22 @@ def _alerts_response(request, user, notice=None, link=None, status=200):
                                                               alerts.recent_deliveries(user["id"]), notice=notice, link=link),
                                           request.state.csp_nonce),
                         status_code=status)
+
+
+# ---------------------- Mi plan ----------------------
+
+PLAN_NOTICES = {}
+
+
+def _plan_response(request, user, notice=None, status=200):
+    with db.cursor() as cur:
+        est = suscripciones.estado(cur, user)
+    return HTMLResponse(pwa.inject_sesion(pages.render_plan(user, est, notice=notice), request.state.csp_nonce), status_code=status)
+
+
+@app.get("/plan", response_class=HTMLResponse)
+def plan_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    return _plan_response(request, user, notice=PLAN_NOTICES.get(m))
 
 
 @app.get("/alerts", response_class=HTMLResponse)
