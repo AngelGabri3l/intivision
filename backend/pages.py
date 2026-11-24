@@ -101,7 +101,8 @@ def menu_usuario(user, active) -> str:
             '<span class="menu-usuario__flecha" aria-hidden="true">▾</span><span class="solo-lectores">Menú de tu cuenta</span></summary>'
             '<div class="menu-usuario__panel">'
             f'<div class="menu-usuario__cabecera"><strong>{esc(nombre)}</strong><span>{role_text(user)}</span></div>'
-            + enlace("/plan", "Mi plan", "plan") + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
+            + enlace("/plan", "Mi plan", "plan") + enlace("/cuenta/contrasena", "Cambiar contraseña", "cuenta")
+            + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
             + '<form method="post" action="/logout"><button class="menu-usuario__salir" type="submit">Cerrar sesión</button></form>'
             '</div></details>')
 
@@ -689,3 +690,70 @@ def render_mp_ir(s, url) -> str:
     pagina = pagina.replace("Modo de prueba · pasarela de pagos simulada · no se cobra dinero real",
                             "Pago seguro con Mercado Pago · si usas credenciales de prueba no se cobra dinero real")
     return pagina.replace("</head>", f'<meta http-equiv="refresh" content="2;url={esc(url)}">\n</head>', 1)
+
+
+
+# ------------------------------------------------------------------ contraseña: cambiar y recuperar
+
+def _campo_clave(id_, etiqueta, auto, minimo=False) -> str:
+    return (f'<div class="campo"><label class="campo__etiqueta" for="{id_}">{etiqueta}</label>'
+            f'<input class="campo__entrada" id="{id_}" name="{id_}" type="password" autocomplete="{auto}" maxlength="1024"'
+            + (f' minlength="{auth.MIN_PASSWORD_CHARS}"' if minimo else "") + ' required></div>')
+
+
+def _reglas_clave() -> str:
+    return (f'<p class="analisis__descripcion">Mínimo {auth.MIN_PASSWORD_CHARS} caracteres, sin tu nombre, tu correo ni tu teléfono, '
+            'y que no sea de las más comunes.</p>')
+
+
+def render_cuenta_contrasena(user, notice=None) -> str:
+    formulario = ('<form method="post" action="/cuenta/contrasena" autocomplete="off" class="formulario">'
+                  + _campo_clave("actual", "Contraseña actual", "current-password")
+                  + _campo_clave("nueva", "Contraseña nueva", "new-password", minimo=True)
+                  + _campo_clave("confirmacion", "Repite la contraseña nueva", "new-password", minimo=True)
+                  + _reglas_clave() + '<div><button class="btn" type="submit">Cambiar contraseña</button></div></form>')
+    return fill(read_template("cuenta.html"), nav=nav(user, "cuenta"),
+                descripcion="Al cambiarla cerramos tus sesiones en los demás dispositivos; esta sigue abierta y te avisamos por Telegram.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", formulario=formulario)
+
+
+def _estado_login(mensaje, tipo="error") -> str:
+    etiqueta = {"alerta": "Aviso", "ok": "Listo"}.get(tipo, "Error")
+    return (f'<p class="estado" data-tipo="{tipo}" role="alert"><span class="estado__tag">{etiqueta}</span><span>{esc(mensaje)}</span></p>')
+
+
+def render_recuperar(modo, error=None, token="", identifier="") -> str:
+    """modo: 'pedir' (formulario), 'enviado' (respuesta única), 'nueva' (elegir contraseña con el enlace) o 'invalido'."""
+    def cabecera(titulo, texto):
+        return (f'<div class="analisis__texto"><h1 class="analisis__titulo pixel" id="titulo-acceso">{titulo}</h1>'
+                f'<p class="analisis__descripcion">{texto}</p></div>')
+    volver = '<p class="analisis__descripcion acceso__nota"><a href="/login" style="color:inherit;text-decoration:underline;text-underline-offset:4px">Volver a iniciar sesión</a></p>'
+    if modo == "enviado":
+        cuerpo = (cabecera("Revisa tu Telegram", "Si esa cuenta existe y tiene Telegram vinculado, te enviamos un enlace para cambiar la contraseña. "
+                           f"Vale {cuenta_minutos()} minutos y solo se puede usar una vez.")
+                  + '<div class="formulario">' + _estado_login("Si no te llega nada, tu cuenta no tiene Telegram vinculado: pídele al administrador de tu comunidad "
+                                                               "que te genere un enlace.", "alerta") + volver + "</div>")
+    elif modo == "nueva":
+        cuerpo = (cabecera("Elige tu contraseña nueva", "Al guardarla cerramos tus sesiones en todos los dispositivos.")
+                  + f'<form class="formulario" method="post" action="/recuperar/{esc(token)}" autocomplete="off">'
+                  + _campo_clave("nueva", "Contraseña nueva", "new-password", minimo=True)
+                  + _campo_clave("confirmacion", "Repite la contraseña nueva", "new-password", minimo=True)
+                  + (_estado_login(error) if error else "") + _reglas_clave()
+                  + '<div><button class="btn" type="submit">Guardar contraseña</button></div></form>')
+    elif modo == "invalido":
+        cuerpo = (cabecera("Este enlace ya no sirve", "Pudo vencer (dura unos minutos) o ya se usó.")
+                  + '<div class="formulario"><div><a class="btn" href="/recuperar" style="text-decoration:none;display:inline-block">Pedir un enlace nuevo</a></div></div>')
+    else:
+        cuerpo = (cabecera("Recupera tu contraseña", "Escribe el correo o el teléfono de tu cuenta. Si tienes Telegram vinculado, te mandamos un enlace.")
+                  + '<form class="formulario" method="post" action="/recuperar" autocomplete="on"><div class="campo">'
+                  '<label class="campo__etiqueta" for="identifier">Correo o teléfono</label>'
+                  '<input class="campo__entrada" id="identifier" name="identifier" type="text" inputmode="email" autocomplete="username" '
+                  f'autocapitalize="none" spellcheck="false" maxlength="254" value="{esc(identifier)}" required autofocus></div>'
+                  + (_estado_login(error, "alerta") if error else "")
+                  + '<div><button class="btn" type="submit">Enviarme el enlace</button></div>' + volver + "</form>")
+    return fill(read_template("recuperar.html"), contenido='<div class="contenedor analisis">' + cuerpo + "</div>")
+
+
+def cuenta_minutos() -> int:
+    from backend import cuenta
+    return cuenta.TOKEN_MINUTOS

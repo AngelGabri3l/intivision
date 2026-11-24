@@ -30,6 +30,7 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage procesar-suscripciones         (renovaciones, bajadas y bajas que ya tocan)
   docker compose exec backend python -m backend.manage vencer-periodo --user correo@ejemplo.com   (SOLO DEMO: termina su período ya)
   docker compose exec backend python -m backend.manage mp-sincronizar                 (trae de Mercado Pago el estado de las suscripciones)
+  docker compose exec backend python -m backend.manage enlace-recuperacion --user correo@ejemplo.com   (enlace de un solo uso para quien no tiene Telegram)
 
 La contraseña se pide por teclado (no se ve y no queda en el historial). Para automatizar se puede
 pasar el nombre de una variable de entorno con --password-env.
@@ -44,7 +45,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import auth, cameras, db, mapa, planes, evidencia_premium, suscripciones  # noqa: E402
+from backend import auth, cameras, db, mapa, planes, evidencia_premium, suscripciones, cuenta  # noqa: E402
 
 EVIDENCE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "events")
 
@@ -451,6 +452,15 @@ def mp_sincronizar(args):
     print(f"Listo: {len(refs)} suscripción(es) revisada(s).")
 
 
+def enlace_recuperacion(args):
+    """Genera un enlace de un solo uso (30 minutos) para cambiar la contraseña; se lo das a la persona por un medio que ya conozcas."""
+    with db.cursor() as cur:
+        user = find_user(cur, args.user)
+        token = cuenta.enlace_de_soporte(cur, user["id"])
+    base = (os.environ.get("PUBLIC_BASE_URL") or "https://app.intivision.online").rstrip("/")
+    print(f"Enlace para «{user['full_name']}» (vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez):\n{base}/recuperar/{token}")
+
+
 def set_plan(args):
     """Pone el plan de una comunidad entera o de una vivienda (las cámaras privadas de ese usuario)."""
     if bool(args.community_slug) == bool(args.user):
@@ -563,6 +573,10 @@ def main():
 
     p = sub.add_parser("mp-sincronizar", help="trae de Mercado Pago el estado de las suscripciones")
     p.set_defaults(fn=mp_sincronizar)
+
+    p = sub.add_parser("enlace-recuperacion", help="enlace de un solo uso para cambiar la contraseña (para quien no tiene Telegram)")
+    p.add_argument("--user", required=True, help="correo o teléfono")
+    p.set_defaults(fn=enlace_recuperacion)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")

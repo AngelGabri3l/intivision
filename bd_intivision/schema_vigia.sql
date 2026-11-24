@@ -549,3 +549,16 @@ CREATE INDEX IF NOT EXISTS ix_checkout_provider_ref ON checkout_sessions (provid
 CREATE INDEX IF NOT EXISTS ix_payments_provider_ref ON payments (provider_ref) WHERE provider_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_subscriptions_provider_ref ON subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_community_subs_provider_ref ON community_subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
+
+-- ------------------------------------------------------------------ 013 · recuperar la contraseña (igual que la migración 013)
+CREATE TABLE IF NOT EXISTS password_resets (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token_hash   text        NOT NULL UNIQUE,                       -- sha256 del enlace
+    channel      text        NOT NULL DEFAULT 'telegram' CHECK (channel IN ('telegram', 'soporte')),
+    requested_ip inet,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    expires_at   timestamptz NOT NULL,
+    used_at      timestamptz
+);
+CREATE INDEX IF NOT EXISTS ix_password_resets_user ON password_resets (user_id, created_at DESC);

@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -417,6 +417,7 @@ LOGIN_NOTICES = {
     "expirada": ("Tu sesión terminó por inactividad. Inicia sesión de nuevo.", "alerta"),
     "cerrada": ("Tu sesión se cerró desde otro dispositivo. Inicia sesión de nuevo.", "alerta"),
     "todas": ("Cerraste sesión en todos tus dispositivos.", "ok"),
+    "clave_cambiada": ("Tu contraseña se cambió. Inicia sesión con la nueva.", "ok"),
     "baja": ("Te diste de baja de INTIVISION: tu cuenta se cerró y tus cámaras quedaron sin asignar. Gracias por usar el servicio.", "ok"),
 }
 
@@ -461,6 +462,95 @@ def login_submit(request: Request, identifier: str = Form(""), password: str = F
 def session_ping(user: dict = Depends(auth.current_user)):
     """El navegador avisa que la persona sigue ahí (clic, tecla, toque): ser un POST es lo que renueva su inactividad."""
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------- contraseña: cambiar (con sesión) y recuperar (sin sesión) ----------------------
+
+CUENTA_NOTICES = {"ok": ("ok", "Contraseña cambiada. Cerramos tus sesiones en los demás dispositivos.")}
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,80}")
+_PAGINA_PRIVADA = {"Cache-Control": "no-store"}            # la política de referencia (same-origin) la pone el filtro de seguridad de todas las páginas
+
+
+def _avisar_por_telegram(user_id, texto):
+    threading.Thread(target=alerts.notify_user, args=(user_id, texto), daemon=True).start()
+
+
+def _cuenta_response(request, user, notice=None, status=200):
+    return HTMLResponse(pwa.inject_sesion(pages.render_cuenta_contrasena(user, notice), request.state.csp_nonce), status_code=status, headers=_PAGINA_PRIVADA)
+
+
+@app.get("/cuenta/contrasena", response_class=HTMLResponse)
+def cuenta_contrasena_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    return _cuenta_response(request, user, CUENTA_NOTICES.get(m))
+
+
+@app.post("/cuenta/contrasena", response_class=HTMLResponse)
+def cuenta_contrasena_guardar(request: Request, actual: str = Form(""), nueva: str = Form(""), confirmacion: str = Form(""),
+                              user: dict = Depends(auth.current_user)):
+    """Cambia la contraseña: pide la actual (los errores cuentan para el bloqueo), cierra las demás sesiones y avisa por Telegram."""
+    ip = auth.client_ip(request)
+    if auth.throttled(ip):
+        return _cuenta_response(request, user, ("alerta", "Demasiados intentos desde esta conexión. Espera unos minutos."), 429)
+    with db.cursor() as cur:
+        ok, mensaje, _cerradas = cuenta.cambiar(cur, user, actual, nueva, confirmacion, request.cookies.get(auth.SESSION_COOKIE), ip)
+    if not ok:
+        if "actual no es correcta" in (mensaje or ""):
+            auth.register_failure(ip)
+        return _cuenta_response(request, user, ("error", mensaje), 400)
+    _avisar_por_telegram(user["id"], "🔒 Tu contraseña de INTIVISION se cambió. Si no fuiste tú, avisa de inmediato al administrador de tu comunidad.")
+    return RedirectResponse("/cuenta/contrasena?m=ok", status_code=303)
+
+
+@app.get("/recuperar", response_class=HTMLResponse)
+def recuperar_page():
+    return HTMLResponse(pages.render_recuperar("pedir"), headers=_PAGINA_PRIVADA)
+
+
+@app.post("/recuperar", response_class=HTMLResponse)
+def recuperar_pedir(request: Request, identifier: str = Form("")):
+    """
+    Pide el enlace de recuperación. La respuesta es la MISMA exista o no la cuenta, tenga o no Telegram: así nadie puede averiguar
+    qué cuentas existen. Hay un límite por conexión y otro por cuenta.
+    """
+    ip = auth.client_ip(request)
+    if cuenta.ip_limitada(ip):
+        return HTMLResponse(pages.render_recuperar("pedir", "Demasiados pedidos desde esta conexión. Espera unos minutos.", identifier=identifier[:254]),
+                            status_code=429, headers=_PAGINA_PRIVADA)
+    try:
+        with db.cursor() as cur:
+            resultado = cuenta.solicitar(cur, identifier, ip)
+    except psycopg2.OperationalError:
+        return HTMLResponse(pages.render_recuperar("pedir", "El servicio no está disponible. Inténtalo en unos minutos."), status_code=503, headers=_PAGINA_PRIVADA)
+    if resultado:
+        user_id, token = resultado
+        _avisar_por_telegram(user_id, f"🔑 Pediste cambiar tu contraseña de INTIVISION. Abre este enlace (vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez):\n"
+                                      f"{_base_publica(request)}/recuperar/{token}\nSi no fuiste tú, ignora este mensaje.")
+    return HTMLResponse(pages.render_recuperar("enviado"), headers=_PAGINA_PRIVADA)
+
+
+@app.get("/recuperar/{token}", response_class=HTMLResponse)
+def recuperar_con_enlace(token: str):
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    with db.cursor() as cur:
+        fila = cuenta.valido(cur, token)
+    if fila is None:
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    return HTMLResponse(pages.render_recuperar("nueva", token=token), headers=_PAGINA_PRIVADA)
+
+
+@app.post("/recuperar/{token}", response_class=HTMLResponse)
+def recuperar_guardar(token: str, request: Request, nueva: str = Form(""), confirmacion: str = Form("")):
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    with db.cursor() as cur:
+        ok, mensaje, user_id = cuenta.restablecer(cur, token, nueva, confirmacion, auth.client_ip(request))
+    if not ok:
+        if "ya no sirve" in (mensaje or ""):
+            return HTMLResponse(pages.render_recuperar("invalido"), status_code=400, headers=_PAGINA_PRIVADA)
+        return HTMLResponse(pages.render_recuperar("nueva", mensaje, token=token), status_code=422, headers=_PAGINA_PRIVADA)
+    _avisar_por_telegram(user_id, "🔒 Tu contraseña de INTIVISION se cambió y cerramos tus sesiones. Si no fuiste tú, avisa de inmediato al administrador de tu comunidad.")
+    return RedirectResponse("/login?m=clave_cambiada", status_code=303)
 
 
 @app.post("/logout/todos")
