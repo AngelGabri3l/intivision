@@ -1,4 +1,28 @@
+# intivision.online  → la landing (página de presentación)
+# app.intivision.online → la aplicación (backend FastAPI)
+# Caddy pide y renueva solo los certificados HTTPS de los tres nombres.
+
 intivision.online {
+	encode gzip
+
+	# La mini PC sigue funcionando aunque su agent.yaml todavía apunte al dominio principal.
+	@minipc path /ingest /ingest/* /edge/*
+	handle @minipc {
+		reverse_proxy backend:8000
+	}
+
+	# Los enlaces viejos de la aplicación (favoritos, PWA instalada, Telegram) pasan al subdominio.
+	@app path /login* /logout* /cameras* /alerts* /plan* /pagos/* /admin* /events* /evidence/* /session/* /ws/* /mapa/* /static/* /icons/* /sw.js /manifest.webmanifest /offline.html /health
+	handle @app {
+		redir https://app.intivision.online{uri} permanent
+	}
+
+	handle {
+		reverse_proxy landing:3000
+	}
+}
+
+app.intivision.online {
 	reverse_proxy backend:8000
 }
 

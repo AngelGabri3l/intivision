@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1285,6 +1285,9 @@ PLAN_NOTICES = {
     "confirmacion": ("error", "Para darte de baja escribe exactamente DAR DE BAJA."),
     "unico_admin": ("error", "Eres el único administrador de la comunidad: antes de irte, otra persona debe ser administradora."),
     "sin_cambios": ("info", "No había nada que cambiar."),
+    "mp": ("error", "No pudimos comunicarnos con Mercado Pago. No se cambió nada; intenta de nuevo en unos minutos."),
+    "sin_correo": ("error", "Para pagar con Mercado Pago tu cuenta necesita un correo electrónico. Pídele al administrador que lo agregue."),
+    "mp_vuelta": ("info", "Estamos confirmando tu pago con Mercado Pago. En unos segundos verás tu Plan Premium; actualiza la página."),
 }
 _SIN_CACHE = {"Cache-Control": "no-store"}
 
@@ -1297,7 +1300,80 @@ def plan_checkout(scope: str = Form(""), user: dict = Depends(auth.current_user)
             sid = suscripciones.crear_sesion(cur, user, scope)
     except suscripciones.ErrorPago as e:
         return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+    if suscripciones.pasarela() == "mercadopago":
+        return RedirectResponse(f"/pagos/mercadopago/ir/{sid}", status_code=303)
     return RedirectResponse(f"/pagos/checkout/{sid}", status_code=303)
+
+
+def _base_publica(request) -> str:
+    return (os.environ.get("PUBLIC_BASE_URL") or str(request.base_url)).rstrip("/")
+
+
+@app.get("/pagos/mercadopago/ir/{sid}", response_class=HTMLResponse)
+def mercadopago_ir(sid: str, request: Request, user: dict = Depends(auth.current_user)):
+    """Crea la suscripción en Mercado Pago y lleva a su página de pago (con un enlace, no con el formulario: la política de
+    contenido solo deja enviar formularios a este sitio)."""
+    try:
+        with db.cursor() as cur:
+            s = suscripciones.sesion(cur, user, sid)
+            if s is None or s["status"] != "open":
+                return RedirectResponse("/plan?m=sesion", status_code=303)
+            if s.get("provider_ref"):
+                url = mercadopago.obtener(s["provider_ref"]).get("init_point")
+            else:
+                url = suscripciones.iniciar_mercadopago(cur, user, sid, _base_publica(request) + "/pagos/mercadopago/vuelta")
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+    except mercadopago.ErrorMP:
+        return RedirectResponse("/plan?m=mp", status_code=303)
+    if not url or not url.startswith("https://"):
+        return RedirectResponse("/plan?m=mp", status_code=303)
+    return HTMLResponse(pages.render_mp_ir(s, url), headers=_SIN_CACHE)
+
+
+@app.get("/pagos/mercadopago/vuelta")
+def mercadopago_vuelta(preapproval_id: str = "", user: dict = Depends(auth.current_user)):
+    """Mercado Pago devuelve aquí a la persona. Si trae el id de la suscripción, se sincroniza en el acto (sin esperar el webhook)."""
+    if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", preapproval_id or ""):
+        try:
+            with db.cursor() as cur:
+                cur.execute("SELECT 1 FROM checkout_sessions WHERE provider_ref = %s AND user_id = %s", (preapproval_id, user["id"]))
+                if cur.fetchone() and suscripciones.sincronizar_suscripcion(cur, preapproval_id) == "activada":
+                    return RedirectResponse("/plan?m=pagado", status_code=303)
+        except mercadopago.ErrorMP:
+            pass
+    return RedirectResponse("/plan?m=mp_vuelta", status_code=303)
+
+
+@app.post("/pagos/webhook/mercadopago")
+async def mercadopago_webhook(request: Request):
+    """Avisos de Mercado Pago, con la firma x-signature verificada. Tipos: subscription_preapproval y subscription_authorized_payment."""
+    cuerpo = await _read_limited(request, 65_536)
+    if cuerpo is None:
+        return JSONResponse(status_code=413, content={"error": "Aviso demasiado grande."})
+    try:
+        datos = json.loads(cuerpo or b"{}")
+    except ValueError:
+        datos = {}
+    data_id = request.query_params.get("data.id") or str((datos.get("data") or {}).get("id") or "")
+    tipo = request.query_params.get("type") or datos.get("type") or ""
+    if not mercadopago.verificar_firma(request.headers.get("x-signature", ""), request.headers.get("x-request-id", ""), data_id):
+        return JSONResponse(status_code=401, content={"error": "Firma no válida."})
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", data_id):
+        return {"ok": True, "resultado": "ignorado"}
+
+    def aplicar():
+        with db.cursor() as cur:
+            if tipo == "subscription_preapproval":
+                return suscripciones.sincronizar_suscripcion(cur, data_id)
+            if tipo == "subscription_authorized_payment":
+                return suscripciones.registrar_cuota(cur, data_id)
+            return "ignorado"
+    try:
+        resultado = await asyncio.to_thread(aplicar)
+    except mercadopago.ErrorMP:
+        return JSONResponse(status_code=502, content={"error": "No se pudo consultar a Mercado Pago; reintentar."})
+    return {"ok": True, "resultado": resultado}
 
 
 @app.get("/pagos/checkout/{sid}", response_class=HTMLResponse)
@@ -1346,15 +1422,23 @@ def _pago_3ds(cur, user, pid):
 
 @app.post("/plan/cancelar")
 def plan_cancelar(user: dict = Depends(auth.current_user)):
-    with db.cursor() as cur:
-        ok = suscripciones.cancelar_premium(cur, user)
+    try:
+        with db.cursor() as cur:
+            ok = suscripciones.cancelar_premium(cur, user)
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+
     return RedirectResponse(f"/plan?m={'cancelado' if ok else 'sin_cambios'}", status_code=303)
 
 
 @app.post("/plan/reactivar")
 def plan_reactivar(user: dict = Depends(auth.current_user)):
-    with db.cursor() as cur:
-        ok = suscripciones.reactivar(cur, user)
+    try:
+        with db.cursor() as cur:
+            ok = suscripciones.reactivar(cur, user)
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
+
     return RedirectResponse(f"/plan?m={'reactivado' if ok else 'sin_cambios'}", status_code=303)
 
 
@@ -1362,8 +1446,11 @@ def plan_reactivar(user: dict = Depends(auth.current_user)):
 def plan_comunidad(accion: str, user: dict = Depends(auth.current_user)):
     if accion not in ("cancelar", "reactivar") or user["role"] != "community_admin":
         return RedirectResponse("/plan?m=prohibido", status_code=303)
-    with db.cursor() as cur:
-        ok = suscripciones.cancelar_comunidad(cur, user, cancelar=accion == "cancelar")
+    try:
+        with db.cursor() as cur:
+            ok = suscripciones.cancelar_comunidad(cur, user, cancelar=accion == "cancelar")
+    except suscripciones.ErrorPago as e:
+        return RedirectResponse(f"/plan?m={e.codigo}", status_code=303)
     destino = "comunidad_cancelado" if accion == "cancelar" else "comunidad_reactivado"
     return RedirectResponse(f"/plan?m={destino if ok else 'sin_cambios'}", status_code=303)
 

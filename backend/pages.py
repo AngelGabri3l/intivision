@@ -498,7 +498,8 @@ def plan_estado(est) -> str:
     if est["vivienda_premium"]:
         lineas = [f'<strong>Premium de tu vivienda</strong>',
                   f'<span>{esc(suscripciones_soles(est["premium"]["price_pen_cents"]))} al mes'
-                  + (f' · tarjeta {esc(v["card_brand"])} •••• {esc(v["card_last4"])}' if v and v.get("card_last4") else "") + '</span>']
+                  + (f' · tarjeta {esc(v["card_brand"])} •••• {esc(v["card_last4"])}' if v and v.get("card_last4") else "")
+                  + (' · se cobra con Mercado Pago' if v and v.get("provider") == "mercadopago" else "") + '</span>']
         if v["scheduled_action"] == "dar_de_baja":
             lineas.append(f'<span>Diste de baja el servicio: tu cuenta se cierra el {esc(suscripciones_fecha(v["current_period_end"]))}.</span>')
         elif v["cancel_at_period_end"]:
@@ -544,7 +545,7 @@ def plan_pagos(est) -> str:
         detalle = esc(p["failure_message"] or "") if not ok else plan_comprobante_link(p)
         filas.append(f'<tr><td>{esc(suscripciones_fecha(p["created_at"]))}</td>'
                      f'<td>{"Premium comunidad" if p["scope"] == "comunidad" else "Premium vivienda"} · {"renovación" if p["kind"] == "renovacion" else "alta"}</td>'
-                     f'<td>{esc(suscripciones_soles(p["amount_cents"]))}</td><td>{esc(p["card_brand"] or "")} •••• {esc(p["card_last4"] or "")}</td>'
+                     f'<td>{esc(suscripciones_soles(p["amount_cents"]))}</td><td>{esc(p["card_brand"] or "")}{(" •••• " + esc(p["card_last4"])) if p.get("card_last4") else ""}</td>'
                      f'<td class="{"estado-pago--ok" if ok else "estado-pago--falla"}">{estado}</td><td>{detalle}</td></tr>')
     return ('<div class="pagos__tabla"><table class="pagos"><thead><tr><th>Fecha</th><th>Concepto</th><th>Monto</th><th>Tarjeta</th>'
             '<th>Estado</th><th></th></tr></thead><tbody>' + "".join(filas) + '</tbody></table></div>')
@@ -651,13 +652,15 @@ def render_comprobante(c) -> str:
     total = int(c["amount_cents"]); base = round(total / 1.18)
     concepto = "Plan Premium de la comunidad" if c["scope"] == "comunidad" else "Plan Premium de la vivienda"
     caja = (f'<section class="caja" style="grid-column: 1 / -1"><h2>Boleta de venta electrónica {esc(c["receipt_number"])}</h2>'
-            f'<p class="nota">Documento de PRUEBA emitido por la pasarela simulada; no tiene valor tributario.</p>'
+            + ('<p class="nota">Comprobante interno de INTIVISION; el cobro lo procesó Mercado Pago. No tiene valor tributario.</p>'
+               if c.get("provider") == "mercadopago" else
+               '<p class="nota">Documento de PRUEBA emitido por la pasarela simulada; no tiene valor tributario.</p>') +
             f'<table><tr><td>Emisor</td><td>INTIVISION (proyecto académico)</td></tr>'
             f'<tr><td>Cliente</td><td>{esc(c["full_name"])} · {esc(c["contacto"])}</td></tr>'
             f'<tr><td>Comunidad</td><td>{esc(c["comunidad"])}</td></tr>'
             f'<tr><td>Fecha</td><td>{esc(suscripciones_fecha(c["paid_at"]))}</td></tr>'
             f'<tr><td>Concepto</td><td>{concepto} · {"renovación" if c["kind"] == "renovacion" else "alta"} · 30 días</td></tr>'
-            f'<tr><td>Medio de pago</td><td>{esc(c["card_brand"])} •••• {esc(c["card_last4"])}</td></tr>'
+            f'<tr><td>Medio de pago</td><td>{esc(c["card_brand"])}{(" •••• " + esc(c["card_last4"])) if c.get("card_last4") else ""}</td></tr>'
             f'<tr><td>Operación</td><td>{esc(c["id"])}</td></tr>'
             f'<tr><td>Valor de venta</td><td>{esc(suscripciones_soles(base))}</td></tr>'
             f'<tr><td>IGV (18 %)</td><td>{esc(suscripciones_soles(total - base))}</td></tr>'
@@ -671,3 +674,18 @@ def render_plan(user, est, notice=None) -> str:
                 descripcion="Tu plan, lo que incluye y tus pagos. El Plan Premium suma clip de video, posibles armas y más.",
                 aviso=alert_block(notice[1], notice[0]) if notice else "", estado=plan_estado(est), planes=plan_tarjetas(est),
                 pagos=plan_pagos(est), baja=plan_baja(est))
+
+
+
+def render_mp_ir(s, url) -> str:
+    """Paso intermedio hacia Mercado Pago: resumen y botón (y redirección automática a los 2 segundos)."""
+    alcance = "de la comunidad" if s["scope"] == "comunidad" else "de tu vivienda"
+    caja = (f'<section class="caja"><h2>Continúa en Mercado Pago</h2>'
+            f'<p class="nota">Vas a autorizar un cobro mensual de {esc(suscripciones_soles(s["amount_cents"]))}. Tus datos de pago los '
+            f'recibe solo Mercado Pago; INTIVISION nunca los ve. Puedes cancelar cuando quieras desde «Mi plan».</p>'
+            f'<a class="boton" style="display:grid;place-items:center;text-decoration:none" href="{esc(url)}" rel="noopener">Ir a Mercado Pago</a>'
+            f'<p class="nota"><a href="/plan">Cancelar y volver</a></p></section>')
+    pagina = fill(read_template("pago.html"), titulo="Pagar con Mercado Pago", contenido=_resumen(s, alcance) + caja)
+    pagina = pagina.replace("Modo de prueba · pasarela de pagos simulada · no se cobra dinero real",
+                            "Pago seguro con Mercado Pago · si usas credenciales de prueba no se cobra dinero real")
+    return pagina.replace("</head>", f'<meta http-equiv="refresh" content="2;url={esc(url)}">\n</head>', 1)

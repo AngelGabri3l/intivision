@@ -72,6 +72,15 @@ services:
       - caddy_data:/data
     depends_on:
       - backend
+      - landing
+
+  landing:
+    # La landing (Next.js) es otro repositorio: se clona al lado de este (por defecto en ../intivision-landing).
+    build: ${LANDING_DIR:-../intivision-landing}
+    container_name: intivision-landing
+    restart: unless-stopped
+    expose:
+      - "3000"
 volumes:
   caddy_data:
 

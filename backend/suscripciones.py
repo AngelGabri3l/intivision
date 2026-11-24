@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
+import os
 
 PERIODO_DIAS = 30
 _VIGENTE = "status IN ('trialing', 'active', 'past_due')"
@@ -34,7 +36,7 @@ def plan(cur, code="premium") -> dict:
 
 def suscripcion_vivienda(cur, user_id) -> dict | None:
     cur.execute(f"""SELECT s.id::text AS id, s.plan_code, s.status, s.current_period_start, s.current_period_end, s.cancel_at_period_end,
-                           s.scheduled_action, s.payment_method_id, s.renewal_attempts, s.next_retry_at, s.provider,
+                           s.scheduled_action, s.payment_method_id, s.renewal_attempts, s.next_retry_at, s.provider, s.provider_ref,
                            pm.brand AS card_brand, pm.last4 AS card_last4
                     FROM subscriptions s LEFT JOIN payment_methods pm ON pm.id = s.payment_method_id
                     WHERE s.user_id = %s AND s.{_VIGENTE} ORDER BY s.created_at DESC LIMIT 1""", (user_id,))
@@ -44,7 +46,7 @@ def suscripcion_vivienda(cur, user_id) -> dict | None:
 
 def suscripcion_comunidad(cur, community_id) -> dict | None:
     cur.execute("""SELECT cs.id::text AS id, cs.plan_code, cs.status, cs.current_period_start, cs.current_period_end,
-                          cs.cancel_at_period_end, cs.payment_method_id, cs.renewal_attempts, u.full_name AS pagado_por,
+                          cs.cancel_at_period_end, cs.payment_method_id, cs.renewal_attempts, cs.provider, cs.provider_ref, u.full_name AS pagado_por,
                           pm.brand AS card_brand, pm.last4 AS card_last4
                    FROM community_subscriptions cs LEFT JOIN users u ON u.id = cs.paid_by
                    LEFT JOIN payment_methods pm ON pm.id = cs.payment_method_id
@@ -55,7 +57,7 @@ def suscripcion_comunidad(cur, community_id) -> dict | None:
 
 def pagos(cur, user_id, limite=12) -> list[dict]:
     cur.execute("""SELECT id, scope, plan_code, kind, amount_cents, status, failure_message, card_brand, card_last4, receipt_number,
-                          created_at, paid_at
+                          created_at, paid_at, provider
                    FROM payments WHERE user_id = %s ORDER BY created_at DESC LIMIT %s""", (user_id, limite))
     return [dict(r) for r in cur.fetchall()]
 
@@ -188,22 +190,23 @@ def procesar_evento(cur, cuerpo: bytes, firma: str) -> str:
     return "procesado"
 
 
-def activar_vivienda(cur, user_id, payment_method_id, payment_id, ahora=None):
+def activar_vivienda(cur, user_id, payment_method_id, payment_id, ahora=None, provider="pasarela_simulada"):
     cur.execute("""UPDATE subscriptions SET status = 'canceled', canceled_at = now()
                    WHERE user_id = %s AND status IN ('trialing', 'active', 'past_due')""", (user_id,))
     cur.execute("""INSERT INTO subscriptions (user_id, plan_code, status, current_period_start, current_period_end, provider, provider_ref,
                                               payment_method_id)
                    VALUES (%s, 'premium', 'active', coalesce(%s, now()), coalesce(%s, now()) + make_interval(days => %s),
-                           'pasarela_simulada', %s, %s)""", (user_id, ahora, ahora, PERIODO_DIAS, payment_id, payment_method_id))
+                           %s, %s, %s)""", (user_id, ahora, ahora, PERIODO_DIAS, provider, payment_id, payment_method_id))
     cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id)
                    SELECT 'user', u.id, u.community_id, u.id, 'subscription_premium', 'payment', %s FROM users u WHERE u.id = %s""",
                 (payment_id, user_id))
 
 
-def activar_comunidad(cur, community_id, user_id, payment_method_id, ahora=None):
-    cur.execute("""INSERT INTO community_subscriptions (community_id, paid_by, plan_code, current_period_start, current_period_end, payment_method_id)
-                   VALUES (%s, %s, 'premium', coalesce(%s, now()), coalesce(%s, now()) + make_interval(days => %s), %s)""",
-                (community_id, user_id, ahora, ahora, PERIODO_DIAS, payment_method_id))
+def activar_comunidad(cur, community_id, user_id, payment_method_id, ahora=None, provider="pasarela_simulada", provider_ref=None):
+    cur.execute("""INSERT INTO community_subscriptions (community_id, paid_by, plan_code, current_period_start, current_period_end, payment_method_id,
+                                                       provider, provider_ref)
+                   VALUES (%s, %s, 'premium', coalesce(%s, now()), coalesce(%s, now()) + make_interval(days => %s), %s, %s, %s)""",
+                (community_id, user_id, ahora, ahora, PERIODO_DIAS, payment_method_id, provider, provider_ref))
     cur.execute("UPDATE communities SET plan_code = 'premium' WHERE id = %s", (community_id,))
     cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id)
                    VALUES ('user', %s, %s, 'community_premium', 'community', %s)""", (user_id, community_id, str(community_id)))
@@ -227,23 +230,33 @@ def cancelar_premium(cur, user) -> bool:
     """Bajar a Base al final del período pagado (no hay reembolso del período en curso, como en Stripe o Tapo Care)."""
     cur.execute("""UPDATE subscriptions SET cancel_at_period_end = true, scheduled_action = 'bajar_a_base'
                    WHERE user_id = %s AND plan_code = 'premium' AND status IN ('active', 'trialing', 'past_due')
-                     AND scheduled_action IS DISTINCT FROM 'dar_de_baja' RETURNING id""", (user["id"],))
-    return cur.fetchone() is not None
+                     AND scheduled_action IS DISTINCT FROM 'dar_de_baja' RETURNING id, provider, provider_ref""", (user["id"],))
+    fila = cur.fetchone()
+    if fila:
+        _mp_estado(fila, "paused")          # Mercado Pago deja de cobrar; el Premium sigue hasta el final del período
+    return fila is not None
 
 
 def reactivar(cur, user) -> bool:
     """Deshace una bajada a Base o una baja programada, antes de que llegue el final del período."""
     cur.execute("""UPDATE subscriptions SET cancel_at_period_end = false, scheduled_action = NULL
-                   WHERE user_id = %s AND status IN ('active', 'trialing', 'past_due') AND cancel_at_period_end RETURNING id""", (user["id"],))
-    return cur.fetchone() is not None
+                   WHERE user_id = %s AND status IN ('active', 'trialing', 'past_due') AND cancel_at_period_end
+                   RETURNING id, provider, provider_ref""", (user["id"],))
+    fila = cur.fetchone()
+    if fila:
+        _mp_estado(fila, "authorized")
+    return fila is not None
 
 
 def cancelar_comunidad(cur, admin, cancelar=True) -> bool:
     if admin["role"] != "community_admin":
         return False
     cur.execute("""UPDATE community_subscriptions SET cancel_at_period_end = %s
-                   WHERE community_id = %s AND status IN ('active', 'past_due') RETURNING id""", (cancelar, admin["community_id"]))
-    return cur.fetchone() is not None
+                   WHERE community_id = %s AND status IN ('active', 'past_due') RETURNING id, provider, provider_ref""", (cancelar, admin["community_id"]))
+    fila = cur.fetchone()
+    if fila:
+        _mp_estado(fila, "paused" if cancelar else "authorized")
+    return fila is not None
 
 
 def dar_de_baja(cur, user) -> tuple[str, dict | None]:
@@ -260,6 +273,7 @@ def dar_de_baja(cur, user) -> tuple[str, dict | None]:
     if s and s["plan_code"] == "premium" and s["status"] in ("active", "trialing") and s["current_period_end"] and \
             s["current_period_end"] > datetime.datetime.now(datetime.timezone.utc):
         cur.execute("UPDATE subscriptions SET cancel_at_period_end = true, scheduled_action = 'dar_de_baja' WHERE id = %s", (s["id"],))
+        _mp_estado(s, "paused")
         return "programada", None
     return "inmediata", baja_efectiva(cur, user["id"], "a pedido de la persona")
 
@@ -286,7 +300,9 @@ def baja_efectiva(cur, user_id, motivo) -> dict:
     cur.execute("UPDATE sessions SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL", (user_id,))
     cur.execute("DELETE FROM notification_channels WHERE user_id = %s", (user_id,))     # como «Desvincular» en Alertas
     cur.execute("""UPDATE subscriptions SET status = 'canceled', canceled_at = now(), cancel_at_period_end = false
-                   WHERE user_id = %s AND status IN ('trialing', 'active', 'past_due')""", (user_id,))
+                   WHERE user_id = %s AND status IN ('trialing', 'active', 'past_due') RETURNING provider, provider_ref""", (user_id,))
+    for fila in cur.fetchall():
+        _mp_estado(fila, "cancelled", estricto=False)
     cur.execute("DELETE FROM payment_methods WHERE user_id = %s", (user_id,))
     cur.execute("UPDATE users SET status = 'canceled' WHERE id = %s", (user_id,))
     cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id, meta)
@@ -348,10 +364,18 @@ def procesar_vencimientos(cur, ahora=None) -> list[tuple[str, str]]:
                    ORDER BY s.current_period_end FOR UPDATE OF s SKIP LOCKED""", (ahora, ahora))
     for s in [dict(r) for r in cur.fetchall()]:
         uid = str(s["user_id"])
+        if s.get("provider") == "mercadopago" and not s["cancel_at_period_end"] and not s["scheduled_action"]:
+            # La cobra Mercado Pago (y reintenta 10 días). Si pasado ese plazo no llegó ninguna cuota, vuelve al Plan Base.
+            if s["current_period_end"] + datetime.timedelta(days=GRACIA_MP_DIAS) < ahora:
+                cur.execute("UPDATE subscriptions SET status = 'canceled', canceled_at = %s WHERE id = %s", (ahora, s["id"]))
+                _mp_estado(s, "cancelled", estricto=False)
+                avisos.append((uid, "No recibimos el pago de tu Plan Premium en Mercado Pago: volviste al Plan Base."))
+            continue
         if s["scheduled_action"] == "dar_de_baja":
             avisos += avisos_de_baja(baja_efectiva(cur, uid, "fin del período pagado"))
         elif s["cancel_at_period_end"]:
             cur.execute("UPDATE subscriptions SET status = 'canceled', canceled_at = %s WHERE id = %s", (ahora, s["id"]))
+            _mp_estado(s, "cancelled", estricto=False)
             avisos.append((uid, "Tu Plan Premium terminó: volviste al Plan Base. Puedes volver a Premium cuando quieras desde «Mi plan»."))
         else:
             ok, pago = _cobrar_renovacion(cur, uid, s["community_id"], "vivienda", p["price_pen_cents"], s["payment_method_id"])
@@ -374,9 +398,17 @@ def procesar_vencimientos(cur, ahora=None) -> list[tuple[str, str]]:
                    FOR UPDATE SKIP LOCKED""", (ahora, ahora))
     for s in [dict(r) for r in cur.fetchall()]:
         quien = str(s["paid_by"]) if s["paid_by"] else None
+        if s.get("provider") == "mercadopago" and not s["cancel_at_period_end"] and quien is not None:
+            if s["current_period_end"] + datetime.timedelta(days=GRACIA_MP_DIAS) < ahora:
+                cur.execute("UPDATE community_subscriptions SET status = 'canceled', canceled_at = %s WHERE id = %s", (ahora, s["id"]))
+                cur.execute("UPDATE communities SET plan_code = 'base' WHERE id = %s", (s["community_id"],))
+                _mp_estado(s, "cancelled", estricto=False)
+                avisos.append((quien, "No recibimos el pago del Plan Premium de la comunidad en Mercado Pago: volvió al Plan Base."))
+            continue
         if s["cancel_at_period_end"] or quien is None:
             cur.execute("UPDATE community_subscriptions SET status = 'canceled', canceled_at = %s WHERE id = %s", (ahora, s["id"]))
             cur.execute("UPDATE communities SET plan_code = 'base' WHERE id = %s", (s["community_id"],))
+            _mp_estado(s, "cancelled", estricto=False)
             if quien:
                 avisos.append((quien, "El Plan Premium de la comunidad terminó: las cámaras volvieron al Plan Base."))
             continue
@@ -424,3 +456,117 @@ def ciclo_forever(stop, cada_s: float = 600):
         except Exception:       # noqa: BLE001
             log.exception("Fallo al procesar los vencimientos de las suscripciones")
         stop.wait(cada_s)
+
+
+# ------------------------------------------------------------------ Mercado Pago (PASARELA=mercadopago)
+
+GRACIA_MP_DIAS = 12                # Mercado Pago reintenta una cuota rechazada durante 10 días
+_log = logging.getLogger("backend.suscripciones")
+
+
+def pasarela() -> str:
+    return "mercadopago" if os.environ.get("PASARELA", "").strip().lower() == "mercadopago" else "simulada"
+
+
+def _mp_estado(fila, estado, estricto=True):
+    """Si la suscripción es de Mercado Pago, le cambia el estado allí. Con `estricto`, un fallo deshace el cambio local."""
+    if not fila or fila.get("provider") != "mercadopago" or not fila.get("provider_ref"):
+        return
+    from backend import mercadopago
+    try:
+        mercadopago.cambiar_estado(fila["provider_ref"], estado)
+    except mercadopago.ErrorMP as e:
+        if estricto:
+            raise ErrorPago("No pudimos comunicarnos con Mercado Pago. No se cambió nada; intenta de nuevo en unos minutos.", "mp") from e
+        _log.warning("No se pudo poner en «%s» la suscripción de Mercado Pago (%s).", estado, e.mensaje[:160])
+
+
+def iniciar_mercadopago(cur, user, sid, volver_a: str) -> str:
+    """Crea la suscripción en Mercado Pago para la sesión de pago y devuelve la dirección de su página de pago."""
+    from backend import mercadopago
+    s = sesion(cur, user, sid)
+    if s is None or s["status"] != "open":
+        raise ErrorPago("Esta sesión de pago ya no está disponible.", "sesion")
+    cur.execute("SELECT email FROM users WHERE id = %s", (user["id"],))
+    correo = os.environ.get("MP_PAYER_EMAIL_PRUEBA") or (cur.fetchone() or {}).get("email")
+    if not correo:
+        raise ErrorPago("Para pagar con Mercado Pago tu cuenta necesita un correo electrónico.", "sin_correo")
+    alcance = "de la comunidad" if s["scope"] == "comunidad" else "de la vivienda"
+    try:
+        pre = mercadopago.crear_suscripcion(f"INTIVISION · Plan Premium {alcance}", sid, correo, s["amount_cents"], volver_a)
+    except mercadopago.ErrorMP as e:
+        _log.warning("Mercado Pago no creó la suscripción: %s", e.mensaje[:200])
+        raise ErrorPago("Mercado Pago no respondió. Intenta de nuevo en unos minutos.", "mp") from e
+    cur.execute("UPDATE checkout_sessions SET provider = 'mercadopago', provider_ref = %s WHERE id = %s", (pre["id"], sid))
+    return pre["init_point"]
+
+
+def sincronizar_suscripcion(cur, preapproval_id: str) -> str:
+    """Trae el estado de la suscripción desde Mercado Pago y lo aplica: 'activada', 'cancelada' o el estado sin cambios."""
+    from backend import mercadopago
+    pre = mercadopago.obtener(preapproval_id)
+    estado = pre.get("status")
+    cur.execute("SELECT * FROM checkout_sessions WHERE provider = 'mercadopago' AND provider_ref = %s FOR UPDATE", (preapproval_id,))
+    ses = cur.fetchone()
+    if estado == "authorized" and ses and ses["status"] == "open":
+        if ses["scope"] == "comunidad":
+            if suscripcion_comunidad(cur, ses["community_id"]) is None:
+                activar_comunidad(cur, ses["community_id"], ses["user_id"], None, provider="mercadopago", provider_ref=preapproval_id)
+        else:
+            activar_vivienda(cur, ses["user_id"], None, preapproval_id, provider="mercadopago")
+        cur.execute("UPDATE checkout_sessions SET status = 'complete', completed_at = now() WHERE id = %s", (ses["id"],))
+        return "activada"
+    if estado == "cancelled":
+        cur.execute("""UPDATE subscriptions SET cancel_at_period_end = true, scheduled_action = coalesce(scheduled_action, 'bajar_a_base')
+                       WHERE provider = 'mercadopago' AND provider_ref = %s AND status IN ('active', 'trialing', 'past_due')""", (preapproval_id,))
+        cur.execute("""UPDATE community_subscriptions SET cancel_at_period_end = true
+                       WHERE provider = 'mercadopago' AND provider_ref = %s AND status IN ('active', 'past_due')""", (preapproval_id,))
+        return "cancelada"
+    return estado or "desconocido"
+
+
+def registrar_cuota(cur, autorizado_id: str) -> str:
+    """Una cuota cobrada (o rechazada) por Mercado Pago: queda en el historial y, si se cobró, extiende el período."""
+    from backend import mercadopago
+    ap = mercadopago.obtener_pago_autorizado(autorizado_id)
+    pre_id, pago = ap.get("preapproval_id"), ap.get("payment") or {}
+    estado = pago.get("status")
+    if estado not in ("approved", "rejected") or not pre_id:
+        return "pendiente"
+    pid = f"mp_{pago.get('id') or autorizado_id}"
+    cur.execute("SELECT 1 FROM payments WHERE id = %s", (pid,))
+    if cur.fetchone():
+        return "repetida"
+    cur.execute("""SELECT s.id, 'vivienda' AS scope, s.user_id, u.community_id FROM subscriptions s JOIN users u ON u.id = s.user_id
+                   WHERE s.provider = 'mercadopago' AND s.provider_ref = %s AND s.status IN ('active', 'trialing', 'past_due')
+                   UNION ALL
+                   SELECT cs.id, 'comunidad', cs.paid_by, cs.community_id FROM community_subscriptions cs
+                   WHERE cs.provider = 'mercadopago' AND cs.provider_ref = %s AND cs.status IN ('active', 'past_due')""", (pre_id, pre_id))
+    sub = cur.fetchone()
+    if sub is None or sub["user_id"] is None:
+        return "desconocida"
+    tabla = "subscriptions" if sub["scope"] == "vivienda" else "community_subscriptions"
+    monto = int(round(float(ap.get("transaction_amount") or 0) * 100)) or 1
+    cur.execute("SELECT count(*) AS n FROM payments WHERE provider_ref = %s AND status = 'succeeded'", (pre_id,))
+    primera = cur.fetchone()["n"] == 0
+    if estado == "approved":
+        cur.execute("SELECT nextval('receipt_seq') AS n")
+        recibo = f"B001-{cur.fetchone()['n']:08d}"
+        cur.execute("""INSERT INTO payments (id, user_id, community_id, scope, plan_code, kind, amount_cents, status, card_brand, receipt_number,
+                                             paid_at, provider, provider_ref)
+                       VALUES (%s, %s, %s, %s, 'premium', %s, %s, 'succeeded', 'Mercado Pago', %s, now(), 'mercadopago', %s)""",
+                    (pid, sub["user_id"], sub["community_id"], sub["scope"], "alta" if primera else "renovacion", monto, recibo, pre_id))
+        if primera:
+            cur.execute(f"UPDATE {tabla} SET status = 'active', renewal_attempts = 0 WHERE id = %s", (sub["id"],))
+        else:
+            cur.execute(f"""UPDATE {tabla} SET status = 'active', renewal_attempts = 0, current_period_start = current_period_end,
+                                  current_period_end = current_period_end + make_interval(days => %s) WHERE id = %s""", (PERIODO_DIAS, sub["id"]))
+        return "aprobada"
+    cur.execute("""INSERT INTO payments (id, user_id, community_id, scope, plan_code, kind, amount_cents, status, failure_code, failure_message,
+                                         card_brand, provider, provider_ref)
+                   VALUES (%s, %s, %s, %s, 'premium', %s, %s, 'failed', %s, 'Mercado Pago no pudo cobrar la cuota; la reintentará.',
+                           'Mercado Pago', 'mercadopago', %s)""",
+                (pid, sub["user_id"], sub["community_id"], sub["scope"], "alta" if primera else "renovacion", monto,
+                 (pago.get("status_detail") or "rejected")[:60], pre_id))
+    cur.execute(f"UPDATE {tabla} SET status = 'past_due', renewal_attempts = renewal_attempts + 1 WHERE id = %s", (sub["id"],))
+    return "rechazada"

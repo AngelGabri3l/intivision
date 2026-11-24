@@ -534,3 +534,18 @@ CREATE TABLE IF NOT EXISTS community_subscriptions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_one_live_community_subscription
     ON community_subscriptions (community_id) WHERE status IN ('active', 'past_due');
+
+-- ------------------------------------------------------------------ 012 · Mercado Pago (igual que la migración 012)
+ALTER TABLE checkout_sessions
+    ADD COLUMN IF NOT EXISTS provider     text NOT NULL DEFAULT 'simulada',
+    ADD COLUMN IF NOT EXISTS provider_ref text;                    -- id de la suscripción (preapproval) en Mercado Pago
+ALTER TABLE payments
+    ADD COLUMN IF NOT EXISTS provider     text NOT NULL DEFAULT 'simulada',
+    ADD COLUMN IF NOT EXISTS provider_ref text;                    -- la suscripción de Mercado Pago a la que pertenece el cobro
+ALTER TABLE community_subscriptions
+    ADD COLUMN IF NOT EXISTS provider     text NOT NULL DEFAULT 'pasarela_simulada',
+    ADD COLUMN IF NOT EXISTS provider_ref text;
+CREATE INDEX IF NOT EXISTS ix_checkout_provider_ref ON checkout_sessions (provider_ref) WHERE provider_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_payments_provider_ref ON payments (provider_ref) WHERE provider_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_subscriptions_provider_ref ON subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_community_subs_provider_ref ON community_subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
