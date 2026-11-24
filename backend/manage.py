@@ -29,6 +29,7 @@ Administración desde la terminal. Se ejecuta DENTRO del contenedor del backend:
   docker compose exec backend python -m backend.manage reporte-semanal --si           (los envía por Telegram)
   docker compose exec backend python -m backend.manage procesar-suscripciones         (renovaciones, bajadas y bajas que ya tocan)
   docker compose exec backend python -m backend.manage vencer-periodo --user correo@ejemplo.com   (SOLO DEMO: termina su período ya)
+  docker compose exec backend python -m backend.manage mp-sincronizar                 (trae de Mercado Pago el estado de las suscripciones)
 
 La contraseña se pide por teclado (no se ve y no queda en el historial). Para automatizar se puede
 pasar el nombre de una variable de entorno con --password-env.
@@ -431,6 +432,25 @@ def vencer_periodo(args):
     procesar_suscripciones(args)
 
 
+def mp_sincronizar(args):
+    """Consulta en Mercado Pago las sesiones de pago abiertas y las suscripciones vigentes (útil si el webhook aún no está configurado)."""
+    from backend import mercadopago
+    if not mercadopago.configurado():
+        sys.exit("Falta MP_ACCESS_TOKEN.")
+    with db.cursor() as cur:
+        cur.execute("""SELECT provider_ref FROM checkout_sessions WHERE provider = 'mercadopago' AND status = 'open' AND provider_ref IS NOT NULL
+                       UNION SELECT provider_ref FROM subscriptions WHERE provider = 'mercadopago' AND status IN ('active', 'past_due')
+                       UNION SELECT provider_ref FROM community_subscriptions WHERE provider = 'mercadopago' AND status IN ('active', 'past_due')""")
+        refs = [r["provider_ref"] for r in cur.fetchall() if r["provider_ref"]]
+    for ref in refs:
+        try:
+            with db.cursor() as cur:
+                print(f"  {ref}: {suscripciones.sincronizar_suscripcion(cur, ref)}")
+        except mercadopago.ErrorMP as e:
+            print(f"  {ref}: error ({e.mensaje[:120]})")
+    print(f"Listo: {len(refs)} suscripción(es) revisada(s).")
+
+
 def set_plan(args):
     """Pone el plan de una comunidad entera o de una vivienda (las cámaras privadas de ese usuario)."""
     if bool(args.community_slug) == bool(args.user):
@@ -540,6 +560,9 @@ def main():
     p.add_argument("--user")
     p.add_argument("--community-slug")
     p.set_defaults(fn=vencer_periodo)
+
+    p = sub.add_parser("mp-sincronizar", help="trae de Mercado Pago el estado de las suscripciones")
+    p.set_defaults(fn=mp_sincronizar)
 
     p = sub.add_parser("set-password")
     p.add_argument("--user", required=True, help="correo o teléfono del usuario")
