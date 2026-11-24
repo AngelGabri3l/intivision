@@ -85,6 +85,27 @@ def admin_links(user, active=None) -> str:
     return panel_link(user, active) + mapa_link(user, active) + pending_link(user, active) + equipos_link(user, active)
 
 
+def menu_usuario(user, active) -> str:
+    """
+    El nombre de la persona abre un menú con lo de su cuenta: Mi plan (donde se paga, se baja de plan o se cancela), la seguridad de
+    su cuenta y Cerrar sesión. Es un <details>: funciona sin JavaScript; un script pequeño lo cierra con Esc o al tocar fuera.
+    """
+    def enlace(href, texto, clave=None):
+        actual = ' aria-current="page"' if clave and clave == active else ""
+        return f'<a href="{href}"{actual}>{texto}</a>'
+    nombre = (user["full_name"] or "").strip() or "Mi cuenta"
+    return ('<details class="menu-usuario"><summary class="menu-usuario__boton">'
+            f'<span class="menu-usuario__avatar" aria-hidden="true">{esc(nombre[:1].upper())}</span>'
+            f'<span class="menu-usuario__texto"><span class="menu-usuario__nombre">{esc(nombre)}</span>'
+            f'<span class="menu-usuario__rol">{role_text(user)}</span></span>'
+            '<span class="menu-usuario__flecha" aria-hidden="true">▾</span><span class="solo-lectores">Menú de tu cuenta</span></summary>'
+            '<div class="menu-usuario__panel">'
+            f'<div class="menu-usuario__cabecera"><strong>{esc(nombre)}</strong><span>{role_text(user)}</span></div>'
+            + enlace("/plan", "Mi plan", "plan") + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
+            + '<form method="post" action="/logout"><button class="menu-usuario__salir" type="submit">Cerrar sesión</button></form>'
+            '</div></details>')
+
+
 def nav(user, active) -> str:
     """
     La cabecera completa menos su marco: en la primera fila la marca, y a la derecha el usuario con «Cerrar sesión»; en la segunda, las
@@ -95,10 +116,9 @@ def nav(user, active) -> str:
         return f'<a class="pestana" href="{href}"{actual}>{texto}</a>'
     return ('<div class="contenedor cabecera__fila"><div class="marca">'
             '<span class="marca__nombre pixel">INTIVISION</span><span class="marca__modulo">Guardian</span></div>'
-            f'<div class="cabecera__usuario"><span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
-            '<form method="post" action="/logout"><button class="salir" type="submit">Cerrar sesión</button></form></div></div>'
+            f'<div class="cabecera__usuario">{menu_usuario(user, active)}</div></div>'
             '<nav aria-label="Principal" class="cabecera__pestanas"><div class="contenedor cabecera__tabs">'
-            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas") + pestana("/plan", "Mi plan", "plan")
+            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas")
             + admin_links(user, active)
             + '</div></nav>')
 
