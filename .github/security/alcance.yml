@@ -1,0 +1,14 @@
+# Alcance del pipeline de seguridad.
+# Los componentes listados aquí se siguen revisando, pero sus hallazgos se muestran como
+# "fuera de alcance" y NO bloquean el pipeline. Cada entrada debe decir por qué y cuándo revisarla.
+
+fuera_de_alcance:
+  - componente: mqtt
+    estado: no-desarrollado
+    motivo: >-
+      El módulo MQTT de la sirena (actuator.py, mosquitto.conf, servicio mqtt del compose y
+      wokwi/sketch.ino) todavía no está desarrollado: solo existe como demo en el simulador Wokwi.
+    revisar_cuando: >-
+      Antes de conectar un dispositivo físico o de desplegar un broker. En ese momento hay que usar
+      un broker propio con usuario/contraseña, ACL y TLS (pista 1 de la auditoría).
+    responsable: equipo intivision
