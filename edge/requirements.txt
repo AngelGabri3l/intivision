@@ -4,4 +4,4 @@ opencv-python-headless>=4.8.0,<6   # probado con 4.13 y 5.0
 numpy>=1.24.0,<3
 PyYAML>=6.0,<7
 requests>=2.31,<3                  # habla con el servidor (envía eventos, inventario y pide la configuración)
-psutil>=5.9,<8                    # cuánta CPU y memoria usa el equipo (se muestra en «Equipos y cámaras»)
+psutil>=7.2.2,<8                    # cuánta CPU y memoria usa el equipo (se muestra en «Equipos y cámaras»)
