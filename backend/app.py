@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -549,6 +549,187 @@ def recuperar_guardar(token: str, request: Request, nueva: str = Form(""), confi
         return HTMLResponse(pages.render_recuperar("nueva", mensaje, token=token), status_code=422, headers=_PAGINA_PRIVADA)
     _avisar_por_telegram(user_id, "🔒 Tu contraseña de INTIVISION se cambió y cerramos tus sesiones. Si no fuiste tú, avisa de inmediato al administrador de tu comunidad.")
     return RedirectResponse("/login?m=clave_cambiada", status_code=303)
+
+
+# ---------------------- personas (administrador), familia (vecino) e invitaciones ----------------------
+
+PERSONAS_NOTICES = {
+    "suspendida": ("ok", "Cuenta suspendida: se cerraron sus sesiones."), "reactivada": ("ok", "Cuenta reactivada."),
+    "rol": ("ok", "Rol cambiado. Sus sesiones se cerraron para que entre con el rol nuevo."), "sesiones": ("ok", "Se cerraron sus sesiones."),
+    "baja": ("ok", "La persona quedó dada de baja: sus cámaras están sin asignar en «Equipos»."), "revocada": ("ok", "Invitación revocada."),
+    "confirmacion": ("error", "Para dar de baja escribe exactamente BAJA."), "no_existe": ("error", "No existe esa invitación o persona."),
+    "familiar_quitado": ("ok", "Familiar quitado: ya no ve tus cámaras."), "camaras": ("ok", "Cámaras compartidas actualizadas."),
+}
+
+
+def _enlace_invitacion(request, nombre, token, telefono):
+    telefono = re.sub(r"\D", "", telefono or "") or None              # wa.me usa solo dígitos, con el código de país
+    return {"titulo": f"Invitación para {nombre}", "url": f"{_base_publica(request)}/invitacion/{token}", "telefono": telefono,
+            "mensaje": "Te invito a INTIVISION. Crea tu cuenta aquí:", "vigencia": f"Vale {personas.INVITACION_HORAS} horas y se usa una sola vez."}
+
+
+def _personas_response(request, user, notice=None, enlace=None, status=200):
+    with db.cursor() as cur:
+        lista, pend = personas.listar(cur, user), personas.pendientes(cur, user)
+    return HTMLResponse(pwa.inject(pages.render_personas(user, lista, pend, notice, enlace), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin/personas", response_class=HTMLResponse)
+def personas_page(request: Request, m: str = "", user: dict = Depends(auth.require_admin)):
+    return _personas_response(request, user, PERSONAS_NOTICES.get(m))
+
+
+@app.post("/admin/personas/invitar", response_class=HTMLResponse)
+def personas_invitar(request: Request, nombre: str = Form(""), email: str = Form(""), phone: str = Form(""), rol: str = Form("resident"),
+                     user: dict = Depends(auth.require_admin)):
+    if rol not in personas.ROLES_QUE_INVITA_EL_ADMIN:
+        return _personas_response(request, user, ("error", "Rol no válido. Los familiares los invita cada vecino desde «Mi familia»."), status=400)
+    try:
+        with db.cursor() as cur:
+            _, token = personas.invitar(cur, user, nombre, email, phone, rol)
+    except personas.ErrorPersonas as e:
+        return _personas_response(request, user, ("error", e.mensaje), status=e.status)
+    return _personas_response(request, user, ("ok", "Invitación creada."), _enlace_invitacion(request, " ".join(nombre.split()), token, phone.strip() or None))
+
+
+@app.post("/admin/personas/invitaciones/{inv_id}/{accion}", response_class=HTMLResponse)
+def personas_invitacion(inv_id: str, accion: str, request: Request, user: dict = Depends(auth.require_admin)):
+    return _invitacion_accion(request, user, inv_id, accion, "/admin/personas", _personas_response)
+
+
+def _invitacion_accion(request, user, inv_id, accion, volver, responder):
+    with db.cursor() as cur:
+        if accion == "revocar":
+            ok = personas.revocar(cur, user, inv_id)
+            return RedirectResponse(f"{volver}?m={'revocada' if ok else 'no_existe'}", status_code=303)
+        if accion == "reenviar":
+            cur.execute("SELECT full_name, phone FROM invitations WHERE id::text = %s", (inv_id,))
+            datos = cur.fetchone()
+            token = personas.reenviar(cur, user, inv_id)
+    if accion != "reenviar" or token is None:
+        return RedirectResponse(f"{volver}?m=no_existe", status_code=303)
+    return responder(request, user, ("ok", "Nuevo enlace creado; el anterior ya no sirve."), _enlace_invitacion(request, datos["full_name"], token, datos["phone"]))
+
+
+@app.post("/admin/personas/{uid}/{accion}", response_class=HTMLResponse)
+def personas_accion(uid: str, accion: str, request: Request, rol: str = Form(""), confirmacion: str = Form(""),
+                    user: dict = Depends(auth.require_admin)):
+    """Suspender, reactivar, cambiar el rol, enlace de contraseña, cerrar sesiones o dar de baja a una persona de la comunidad."""
+    try:
+        with db.cursor() as cur:
+            if accion in ("suspender", "reactivar"):
+                personas.cambiar_estado(cur, user, uid, accion == "reactivar")
+                destino = "suspendida" if accion == "suspender" else "reactivada"
+            elif accion == "rol":
+                personas.cambiar_rol(cur, user, uid, rol)
+                destino = "rol"
+            elif accion == "sesiones":
+                personas.cerrar_sesiones(cur, user, uid)
+                destino = "sesiones"
+            elif accion == "enlace":
+                nombre, token = personas.enlace_contrasena(cur, user, uid)
+                destino = None
+            elif accion == "baja":
+                if confirmacion.strip().upper() != "BAJA":
+                    return RedirectResponse("/admin/personas?m=confirmacion", status_code=303)
+                _, info = personas.dar_de_baja(cur, user, uid)
+                destino = "baja"
+            else:
+                return RedirectResponse("/admin/personas?m=no_existe", status_code=303)
+    except personas.ErrorPersonas as e:
+        return _personas_response(request, user, ("error", e.mensaje), status=e.status)
+    if accion == "baja":
+        threading.Thread(target=suscripciones.enviar_avisos, args=(suscripciones.avisos_de_baja(info),), daemon=True).start()
+    if destino is None:
+        enlace = {"titulo": f"Enlace para que {nombre} cambie su contraseña", "url": f"{_base_publica(request)}/recuperar/{token}", "telefono": None,
+                  "mensaje": "Para cambiar tu contraseña de INTIVISION abre:", "vigencia": f"Vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez."}
+        return _personas_response(request, user, ("ok", "Enlace creado."), enlace)
+    return RedirectResponse(f"/admin/personas?m={destino}", status_code=303)
+
+
+def _familia_response(request, user, notice=None, enlace=None, status=200):
+    with db.cursor() as cur:
+        fam, cams, pend = personas.mis_familiares(cur, user), personas.mis_camaras(cur, user), personas.pendientes(cur, dict(user, role="resident"))
+    return HTMLResponse(pwa.inject(pages.render_familia(user, fam, cams, pend, personas.MAX_FAMILIARES, notice, enlace), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/familia", response_class=HTMLResponse)
+def familia_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    return _familia_response(request, user, PERSONAS_NOTICES.get(m))
+
+
+@app.post("/familia/invitar", response_class=HTMLResponse)
+def familia_invitar(request: Request, nombre: str = Form(""), email: str = Form(""), phone: str = Form(""), camaras: list[str] = Form([]),
+                    user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    try:
+        with db.cursor() as cur:
+            _, token = personas.invitar(cur, user, nombre, email, phone, "family", camaras)
+    except personas.ErrorPersonas as e:
+        return _familia_response(request, user, ("error", e.mensaje), status=e.status)
+    return _familia_response(request, user, ("ok", "Invitación creada."), _enlace_invitacion(request, " ".join(nombre.split()), token, phone.strip() or None))
+
+
+@app.post("/familia/invitaciones/{inv_id}/{accion}", response_class=HTMLResponse)
+def familia_invitacion(inv_id: str, accion: str, request: Request, user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    return _invitacion_accion(request, dict(user, role="resident"), inv_id, accion, "/familia",
+                              lambda req, u, notice, enlace: _familia_response(req, user, notice, enlace))
+
+
+@app.post("/familia/{fid}/{accion}", response_class=HTMLResponse)
+def familia_accion(fid: str, accion: str, request: Request, camaras: list[str] = Form([]), user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    try:
+        with db.cursor() as cur:
+            if accion == "camaras":
+                ok = personas.compartir(cur, user, fid, camaras)
+                destino = "camaras"
+            elif accion == "quitar":
+                ok = personas.quitar_familiar(cur, user, fid) is not None
+                destino = "familiar_quitado"
+            else:
+                ok, destino = False, None
+    except personas.ErrorPersonas as e:
+        return _familia_response(request, user, ("error", e.mensaje), status=e.status)
+    return RedirectResponse(f"/familia?m={destino if ok else 'no_existe'}", status_code=303)
+
+
+@app.get("/invitacion/{token}", response_class=HTMLResponse)
+def invitacion_page(token: str):
+    inv = None
+    if _TOKEN_RE.fullmatch(token):
+        with db.cursor() as cur:
+            inv = personas.invitacion_valida(cur, token)
+    return HTMLResponse(pages.render_invitacion(inv, token=token), status_code=200 if inv else 404, headers=_PAGINA_PRIVADA)
+
+
+@app.post("/invitacion/{token}", response_class=HTMLResponse)
+def invitacion_aceptar(token: str, request: Request, nueva: str = Form(""), confirmacion: str = Form(""), acepta: str = Form("")):
+    """Crea la cuenta desde la invitación, abre su sesión y lo lleva a vincular Telegram."""
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_invitacion(None), status_code=404, headers=_PAGINA_PRIVADA)
+    ip = auth.client_ip(request)
+    try:
+        with db.cursor() as cur:
+            nuevo = personas.aceptar(cur, token, nueva, confirmacion, acepta == "1", ip)
+    except personas.ErrorPersonas as e:
+        if e.codigo == "invalida":
+            return HTMLResponse(pages.render_invitacion(None), status_code=404, headers=_PAGINA_PRIVADA)
+        with db.cursor() as cur:
+            inv = personas.invitacion_valida(cur, token)
+        return HTMLResponse(pages.render_invitacion(inv, e.mensaje, token), status_code=e.status, headers=_PAGINA_PRIVADA)
+    sesion = auth.create_session(nuevo["id"], ip, request.headers.get("user-agent"), role=nuevo["role"])
+    response = RedirectResponse("/alerts?m=bienvenida", status_code=303)
+    auth.set_session_cookie(response, request, sesion, nuevo["role"])
+    return response
 
 
 @app.post("/logout/todos")
@@ -1336,6 +1517,7 @@ def camera_visibility(camera_id: str, visible: str = Form(""), user: dict = Depe
 
 ALERT_NOTICES = {
     "guardado": ("ok", "Preferencias guardadas."),
+    "bienvenida": ("ok", "¡Bienvenido a INTIVISION! Vincula tu Telegram para recibir las alertas al instante."),
     "probado": ("ok", "Te mandamos un mensaje de prueba. Revisa tu Telegram."),
     "desvinculado": ("ok", "Telegram desvinculado. Ya no recibirás alertas."),
     "espera": ("alerta", "Espera unos segundos antes de pedir otra prueba."),
