@@ -1,0 +1,356 @@
+# Pipeline de seguridad de intivision.
+# Cada job responde a hallazgos concretos de las auditorías (security-audit run-1 y run-2);
+# el mapa completo está en docs/pipeline-seguridad.md.
+name: Security CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "23 5 * * 1"     # lunes 05:23 UTC: escaneo completo, incluido todo el historial de git
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  SEMGREP_VERSION: "1.184.0"
+  BANDIT_VERSION: "1.9.4"
+  PYYAML_VERSION: "6.0.3"
+  # Un PR que viene de un fork recibe un token de solo lectura: no puede publicar en Code Scanning.
+  # En ese caso los resultados igual salen en el job "Resumen de vulnerabilidades".
+  SARIF_UPLOAD: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------- 1. Secretos
+  secrets:
+    name: Secretos en el código y el historial (gitleaks)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout con todo el historial
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # En PR y push escanea solo los commits nuevos; en schedule y workflow_dispatch, todo el historial.
+      # .gitleaks.toml agrega reglas para hashes bcrypt (pista 5), tokens de Telegram y URLs de Postgres.
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  # ---------------------------------------------------------------- 2. Políticas de configuración
+  policy:
+    name: Políticas de configuración (auditoría)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar PyYAML
+        run: python -m pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+      # Bloquea: puerto del backend expuesto (pista 6), credenciales en el Caddyfile (pista 5) y archivos
+      # de secretos versionados. Avisa: contenedores como root, dependencias sin fijar, ignores
+      # incompletos, Caddy sin límite de cuerpo (pista 14).
+      # Lo declarado en .github/security/alcance.yml (hoy: módulo MQTT, no desarrollado) se reporta
+      # como "fuera de alcance" y no bloquea.
+      - name: Chequeo de políticas
+        run: python .github/security/policy_check.py --root . --json-out policy.json
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-policy
+          path: policy.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------- 3. SAST
+  semgrep:
+    name: SAST (Semgrep + reglas de la auditoría)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar Semgrep
+        run: python -m pip install --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
+      - name: Escaneo completo (reporte)
+        run: >
+          semgrep scan --metrics=off --quiet
+          --config p/python --config p/secrets
+          --config .github/security/semgrep-intivision.yml
+          --exclude wokwi --exclude bd_intivision
+          --sarif --output semgrep.sarif
+      - name: Publicar en Code Scanning
+        if: always() && hashFiles('semgrep.sarif') != '' && env.SARIF_UPLOAD == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-semgrep
+          path: semgrep.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Bloquear hallazgos de severidad ERROR
+        run: >
+          semgrep scan --metrics=off
+          --config p/python --config p/secrets
+          --config .github/security/semgrep-intivision.yml
+          --exclude wokwi --exclude bd_intivision
+          --severity ERROR --error
+
+  bandit:
+    name: SAST (Bandit)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar Bandit
+        run: python -m pip install --disable-pip-version-check "bandit[sarif]==${BANDIT_VERSION}"
+      - name: Escaneo (reporte)
+        run: bandit -r . -x ./wokwi,./bd_intivision,./backend/test_ingest.py,./tools -f sarif -o bandit.sarif --exit-zero
+      - name: Publicar en Code Scanning
+        if: always() && hashFiles('bandit.sarif') != '' && env.SARIF_UPLOAD == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-bandit
+          path: bandit.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Bloquear severidad alta con confianza media o alta
+        run: bandit -r . -x ./wokwi,./bd_intivision,./backend/test_ingest.py,./tools -lll -ii
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - name: Analizar
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: codeql-sarif
+          upload: ${{ env.SARIF_UPLOAD == 'true' && 'always' || 'never' }}
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-codeql-${{ matrix.language }}
+          path: codeql-sarif/*.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------- 4. Infraestructura como código
+  iac:
+    name: Dockerfiles y configuración (Hadolint + Trivy config)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Hadolint (backend/Dockerfile)
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: backend/Dockerfile
+          failure-threshold: error
+      - name: Hadolint (Dockerfile del detector)
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+      - name: Hadolint (edge/Dockerfile, agente de la mini PC)
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: edge/Dockerfile
+          failure-threshold: error
+      # Reporta configuraciones inseguras (p. ej. contenedor como root). El bloqueo lo hace el job policy.
+      - name: Trivy config (reporte)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: "0"
+      - name: Publicar en Code Scanning
+        if: always() && hashFiles('trivy-config.sarif') != '' && env.SARIF_UPLOAD == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-trivy-config
+          path: trivy-config.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------- 5. Imágenes y dependencias
+  # Las dependencias de requirements.txt no están fijadas, así que se auditan las versiones que
+  # realmente se instalan: las de la imagen construida (Trivy, paquetes del SO y de Python).
+  images:
+    name: Construir y escanear imagen ${{ matrix.name }}
+    needs: secrets
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            dockerfile: backend/Dockerfile
+            build_args: ""
+          - name: detector
+            dockerfile: Dockerfile
+            build_args: ""
+          # Agente de la mini PC (run-2). MOTOR=0 = imagen liviana sin PyTorch: escanea las dependencias
+          # propias del agente (OpenCV, requests, websocket-client) sin tardar lo que tarda el motor.
+          - name: edge
+            dockerfile: edge/Dockerfile
+            build_args: MOTOR=0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build local image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_args }}
+          tags: local/intivision-${{ matrix.name }}:${{ github.sha }}
+          load: true
+          push: false
+      # Solo vulnerabilidades con parche disponible: son las que el equipo puede corregir.
+      - name: Trivy imagen (reporte SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: local/intivision-${{ matrix.name }}:${{ github.sha }}
+          format: sarif
+          output: trivy-image-${{ matrix.name }}.sarif
+          vuln-type: os,library
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Publicar en Code Scanning
+        if: always() && hashFiles(format('trivy-image-{0}.sarif', matrix.name)) != '' && env.SARIF_UPLOAD == 'true'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          sarif_file: trivy-image-${{ matrix.name }}.sarif
+          category: trivy-image-${{ matrix.name }}
+      - name: Guardar reporte
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: report-trivy-image-${{ matrix.name }}
+          path: trivy-image-${{ matrix.name }}.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Bloquear vulnerabilidades HIGH/CRITICAL con parche
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: local/intivision-${{ matrix.name }}:${{ github.sha }}
+          format: table
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+  # ---------------------------------------------------------------- 6. Resumen
+  # Junta los reportes de todos los jobs y los imprime en el log y en el resumen de la ejecución,
+  # aunque algún job haya fallado.
+  resumen:
+    name: Resumen de vulnerabilidades
+    if: always()
+    needs: [secrets, policy, semgrep, bandit, codeql, iac, images]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Descargar reportes
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: report-*
+          path: reports
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Imprimir resumen
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python .github/security/sarif_summary.py reports --max-rows 40
