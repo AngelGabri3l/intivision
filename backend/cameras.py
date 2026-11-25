@@ -54,7 +54,7 @@ def place_issue(place):
 
 _SELECT = """
     SELECT c.id::text AS id, c.user_id::text AS user_id, c.community_id::text AS community_id,
-           c.kind, c.name, c.place, c.source_type, c.admin_can_view, c.is_active, c.last_seen_at,
+           c.kind, c.name, c.place, c.source_type, c.admin_can_view, c.is_active, c.last_seen_at, c.ai_enabled,
            u.full_name AS owner_name,
            (SELECT count(*) FROM events e WHERE e.camera_id = c.id) AS total,
            (SELECT count(*) FROM events e WHERE e.camera_id = c.id

@@ -308,7 +308,7 @@ _EVENTS_SELECT = """
     WHERE """
 
 
-def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=None):
+def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=None, texto=None):
     """
     Residente: los eventos suyos o de sus cámaras. Administrador: los de su comunidad, salvo los de cámaras
     que su dueño le oculta. Opcional: una sola cámara, un nivel o un rango de fechas (hora de Lima).
@@ -316,6 +316,9 @@ def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=N
     limit = max(1, min(int(limit), 500))
     alcance, args = acceso.posicional(acceso.eventos(user, "e", "c"), user)        # qué eventos ve cada rol: acceso.py
     condiciones = [alcance]
+    if texto:                                     # búsqueda en las descripciones con IA (Premium), en español
+        condiciones.append("to_tsvector('spanish', coalesce(e.ai_description, '')) @@ plainto_tsquery('spanish', %s)")
+        args.append(texto)
     if camera_id:
         condiciones.append("e.camera_id = %s")
         args.append(camera_id)
@@ -1486,7 +1489,7 @@ def home(user: dict = Depends(auth.current_user)):
 
 @app.get("/cameras/{camera_id}", response_class=HTMLResponse)
 def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = "", hasta: str = "",
-                limite: str = "12", user: dict = Depends(auth.current_user)):
+                limite: str = "12", q: str = "", user: dict = Depends(auth.current_user)):
     cam = cameras.get_camera(user, camera_id)
     if cam is None:
         return _camera_not_found(user)
@@ -1494,7 +1497,8 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
     d_desde, d_hasta = _parse_date(desde), _parse_date(hasta)
     aviso = "Una fecha no es válida y se ignoró." if (desde and not d_desde) or (hasta and not d_hasta) else None
     limite = max(12, min(int(limite), 200)) if limite.isascii() and limite.isdigit() else 12
-    rows = list_events(user, limite + 1, camera_id=cam["id"], level=nivel or None, desde=d_desde, hasta=d_hasta)
+    texto = " ".join(q.split())[:80] if cam.get("premium") else ""          # buscar en las descripciones es del Plan Premium
+    rows = list_events(user, limite + 1, camera_id=cam["id"], level=nivel or None, desde=d_desde, hasta=d_hasta, texto=texto or None)
     if user["role"] == "community_admin" and cam["kind"] == "private" and cam["user_id"] != user["id"]:
         with db.cursor() as cur:        # el administrador abrió la cámara de otra persona: queda registrado
             cur.execute(
@@ -1503,7 +1507,23 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
                 (user["id"], user["community_id"], cam["user_id"], cam["id"], auth._clean_ip(auth.client_ip(request))))
     return HTMLResponse(pwa.inject(pages.render_camera(
         user, cam, rows[:limite], nivel, desde if d_desde else "", hasta if d_hasta else "", limite,
-        len(rows) > limite, aviso, nonce=request.state.csp_nonce, ubicacion=mapa.ficha_ubicacion(user, cam)), request.state.csp_nonce))
+        len(rows) > limite, aviso, nonce=request.state.csp_nonce, ubicacion=mapa.ficha_ubicacion(user, cam), texto=texto), request.state.csp_nonce))
+
+
+@app.post("/cameras/{camera_id}/ia")
+def camera_ia(camera_id: str, activa: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Activa o desactiva la descripción con IA en una cámara: su dueño, o el administrador si es zona común. Queda en la auditoría."""
+    cam = cameras.get_camera(user, camera_id)
+    if cam is None:
+        return _camera_not_found(user)
+    puede = (cam["kind"] == "private" and cam["user_id"] == user["id"]) or (cam["kind"] == "common" and user["role"] == "community_admin")
+    if puede:
+        with db.cursor() as cur:
+            cur.execute("UPDATE cameras SET ai_enabled = %s WHERE id = %s", (activa == "1", cam["id"]))
+            cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id, meta)
+                           VALUES ('user', %s, %s, 'camera_ai_toggle', 'camera', %s, %s::jsonb)""",
+                        (str(user["id"]), user["community_id"], str(cam["id"]), json.dumps({"activa": activa == "1"})))
+    return RedirectResponse(f"/cameras/{cam['id']}", status_code=303)
 
 
 @app.post("/cameras/{camera_id}/visibilidad")

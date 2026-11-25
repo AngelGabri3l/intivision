@@ -292,8 +292,8 @@ def render_cameras(user, cams, message=None) -> str:
         bloques=bloques)
 
 
-def filter_link(cam_id, nivel, desde, hasta, limite) -> str:
-    params = {k: v for k, v in (("nivel", nivel), ("desde", desde), ("hasta", hasta)) if v}
+def filter_link(cam_id, nivel, desde, hasta, limite, texto="") -> str:
+    params = {k: v for k, v in (("nivel", nivel), ("desde", desde), ("hasta", hasta), ("q", texto)) if v}
     params["limite"] = limite
     return f"/cameras/{cam_id}?{urlencode(params)}"
 
@@ -306,10 +306,23 @@ def live_block(cam, nonce) -> str:
                 script=fill(read_template("vivo.js"), camera_id=esc(cam["id"])))
 
 
-def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="", ubicacion=None) -> str:
+def ia_control(user, cam) -> str:
+    """Quién decide si las fotos de esta cámara se describen con IA: su dueño, o el administrador si es zona común."""
+    puede = (cam["kind"] == "private" and cam["user_id"] == user["id"]) or (cam["kind"] == "common" and user["role"] == "community_admin")
+    if not puede:
+        return ""
+    activa = cam.get("ai_enabled", True)
+    return (f'<form class="visibilidad" method="post" action="/cameras/{esc(cam["id"])}/ia">'
+            f'<p class="visibilidad__texto">Descripción automática con IA de las fotos de los eventos: <strong>{"activada" if activa else "desactivada"}</strong>. '
+            'Antes de enviarse, a la foto se le desenfocan los rostros.</p>'
+            f'<input type="hidden" name="activa" value="{0 if activa else 1}">'
+            f'<button class="btn btn--texto" type="submit">{"Desactivar en esta cámara" if activa else "Activar en esta cámara"}</button></form>')
+
+
+def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="", ubicacion=None, texto="") -> str:
     es_dueno = cam["user_id"] == user["id"]
     admin = user["role"] == "community_admin"
-    filtrando = bool(nivel or desde or hasta)
+    filtrando = bool(nivel or desde or hasta or texto)
 
     resumen = "".join(
         f'<div class="resumen__dato"><span class="resumen__valor pixel">{valor}</span>'
@@ -335,6 +348,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                        'Este acceso queda registrado.</p>')
     else:
         visibilidad = ""
+    visibilidad += ia_control(user, cam)
 
     opciones = "".join(f'<option value="{n}"{" selected" if n == nivel else ""}>{n.capitalize()}</option>'
                        for n in cameras.LEVELS)
@@ -345,7 +359,10 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                f'<input class="campo__entrada" id="f-desde" name="desde" type="date" value="{esc(desde)}"></div>'
                f'<div class="campo"><label class="campo__etiqueta" for="f-hasta">Hasta</label>'
                f'<input class="campo__entrada" id="f-hasta" name="hasta" type="date" value="{esc(hasta)}"></div>'
-               f'<div class="filtros__acciones"><button class="btn" type="submit">Filtrar</button>'
+               + (f'<div class="campo"><label class="campo__etiqueta" for="f-q">Buscar en las descripciones</label>'
+                  f'<input class="campo__entrada" id="f-q" name="q" type="search" maxlength="80" value="{esc(texto)}" '
+                  'placeholder="mochila roja, moto…"></div>' if cam.get("premium") else "")
+               + f'<div class="filtros__acciones"><button class="btn" type="submit">Filtrar</button>'
                + (f'<a class="btn btn--texto" href="/cameras/{esc(cam["id"])}">Quitar filtros</a>' if filtrando else "")
                + '</div></form>')
 
@@ -360,7 +377,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                  + '</p></div>')
     mas = ""
     if has_more:
-        mas = (f'<div class="mas"><a class="btn" href="{esc(filter_link(cam["id"], nivel, desde, hasta, limite + 12))}">'
+        mas = (f'<div class="mas"><a class="btn" href="{esc(filter_link(cam["id"], nivel, desde, hasta, limite + 12, texto))}">'
                f'Ver más eventos</a></div>')
 
     return fill(
@@ -932,7 +949,8 @@ def render_invitacion(inv=None, error=None, token="") -> str:
                   + _campo_clave("confirmacion", "Repítela", "new-password", minimo=True) + _reglas_clave()
                   + '<label style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox" name="acepta" value="1" required style="margin-top:4px">'
                   '<span class="analisis__descripcion">Acepto que INTIVISION use mi nombre y mi contacto para darme acceso a las cámaras que '
-                  'me correspondan y enviarme alertas. Puedo darme de baja cuando quiera.</span></label>'
+                  'me correspondan y enviarme alertas, y que una IA describa las fotos de los eventos (con los rostros desenfocados antes de '
+                  'enviarlas). Puedo darme de baja cuando quiera.</span></label>'
                   + (_estado_login(error) if error else "")
                   + '<div><button class="btn" type="submit">Crear mi cuenta</button></div></form>')
     return fill(read_template("recuperar.html"), contenido='<div class="contenedor analisis">' + cuerpo + "</div>").replace(
