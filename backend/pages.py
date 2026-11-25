@@ -37,7 +37,8 @@ def read_template(name) -> str:
 
 
 def role_text(user) -> str:
-    return "Administrador" if user["role"] == "community_admin" else "Residente"
+    from backend import acceso
+    return acceso.nombre_rol(user)
 
 
 def pending_link(user, active=None) -> str:
@@ -101,7 +102,8 @@ def menu_usuario(user, active) -> str:
             '<span class="menu-usuario__flecha" aria-hidden="true">▾</span><span class="solo-lectores">Menú de tu cuenta</span></summary>'
             '<div class="menu-usuario__panel">'
             f'<div class="menu-usuario__cabecera"><strong>{esc(nombre)}</strong><span>{role_text(user)}</span></div>'
-            + enlace("/plan", "Mi plan", "plan") + enlace("/cuenta/contrasena", "Cambiar contraseña", "cuenta")
+            + (enlace("/plan", "Mi plan", "plan") if user.get("role") in ("resident", "community_admin") else "")
+            + enlace("/cuenta/contrasena", "Cambiar contraseña", "cuenta")
             + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
             + '<form method="post" action="/logout"><button class="menu-usuario__salir" type="submit">Cerrar sesión</button></form>'
             '</div></details>')
@@ -168,7 +170,17 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}{zip_link(r)}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{ia_block(r)}{video_block(r)}{zip_link(r)}</div></div>')
+
+
+def ia_block(r) -> str:
+    """La descripción automática del evento, rotulada como tal (puede equivocarse)."""
+    if not r.get("ai_description"):
+        return ""
+    aviso = ('<span class="evento__ia-aviso">La IA no ve personas: podría ser una falsa alarma.</span>'
+             if r.get("ai_sees_people") is False else "")
+    return (f'<p class="evento__ia"><span class="evento__ia-rotulo">Descripción automática · puede equivocarse</span>'
+            f'{esc(r["ai_description"])}{aviso}</p>')
 
 
 def zip_link(r) -> str:

@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -281,6 +281,7 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
             cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
         if notify:
             alerts.enqueue(cur, event_id, community, camera_id, owner, e.get("level"))
+        descripciones.marcar_si_corresponde(cur, event_id, camera_id, e.get("level"), bool(image))   # IA: solo si el plan lo incluye
     return event_id
 
 
@@ -295,6 +296,7 @@ _EVENTS_SELECT = """
              WHERE m.event_id = e.id AND m.kind = 'image'
              ORDER BY m.created_at LIMIT 1) AS image,
            (SELECT m.storage_key FROM media_files m WHERE m.event_id = e.id AND m.kind = 'clip' LIMIT 1) AS clip,
+           e.ai_description, e.ai_sees_people,
            (c.id IS NOT NULL AND """ + planes.sql_es_premium("c") + """) AS premium,
            e.people_count AS people, e.status,
            c.name AS camera_name,
@@ -312,12 +314,8 @@ def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=N
     que su dueño le oculta. Opcional: una sola cámara, un nivel o un rango de fechas (hora de Lima).
     """
     limit = max(1, min(int(limit), 500))
-    if user["role"] == "community_admin":
-        condiciones = ["e.community_id = %s AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)"]
-        args = [user["community_id"], user["id"]]
-    else:
-        condiciones = ["(e.user_id = %s OR c.user_id = %s)"]
-        args = [user["id"], user["id"]]
+    alcance, args = acceso.posicional(acceso.eventos(user, "e", "c"), user)        # qué eventos ve cada rol: acceso.py
+    condiciones = [alcance]
     if camera_id:
         condiciones.append("e.camera_id = %s")
         args.append(camera_id)
@@ -605,6 +603,8 @@ def startup():
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
     alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+    if descripciones.configurada():
+        threading.Thread(target=descripciones.ciclo_forever, args=(_parar_suscripciones, EVIDENCE_DIR), name="descripciones-ia", daemon=True).start()
     if os.environ.get("SUSCRIPCIONES_CICLO", "1") != "0":
         threading.Thread(target=suscripciones.ciclo_forever, args=(_parar_suscripciones,), name="suscripciones", daemon=True).start()
 
@@ -1257,17 +1257,9 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
         return JSONResponse(status_code=404, content={"error": "no encontrado"})   # nombres raros ni se buscan
     safe = name
     with db.cursor() as cur:
-        if user["role"] == "community_admin":
-            cur.execute(
-                """SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
-                   WHERE m.storage_key = %s AND m.community_id = %s
-                     AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)""",
-                (safe, user["community_id"], user["id"]))
-        else:
-            cur.execute(
-                """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
-                   WHERE m.storage_key = %s AND (m.user_id = %s OR c.user_id = %s)""",
-                (safe, user["id"], user["id"]))
+        alcance, args = acceso.posicional(acceso.evidencias(user, "m", "c"), user)     # quién ve qué: acceso.py
+        cur.execute(f"""SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
+                        WHERE m.storage_key = %s AND {alcance}""", [safe] + args)
         row = cur.fetchone()
         path = os.path.join(EVIDENCE_DIR, safe)
         if row is None or not os.path.exists(path):
@@ -1624,6 +1616,8 @@ def _plan_response(request, user, notice=None, status=200):
 
 @app.get("/plan", response_class=HTMLResponse)
 def plan_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):                    # vigilantes y familiares no pagan ni cambian planes
+        return RedirectResponse("/cameras", status_code=303)
     return _plan_response(request, user, notice=PLAN_NOTICES.get(m))
 
 

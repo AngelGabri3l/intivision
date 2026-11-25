@@ -269,6 +269,9 @@ _ENQUEUE_HEAD = """
 """
 _TO_OWNER = " AND ch.user_id = %(owner)s::uuid "
 _TO_ADMINS = " AND u.community_id = %(community)s::uuid AND u.role = 'community_admin' "
+_TO_GUARDS = " AND u.community_id = %(community)s::uuid AND u.role = 'guard' "
+_TO_FAMILY = (" AND u.role = 'family' AND u.sponsor_id = %(owner)s::uuid"
+              " AND EXISTS (SELECT 1 FROM camera_shares sh WHERE sh.user_id = u.id AND sh.camera_id = %(camera)s::uuid) ")
 _ENQUEUE_TAIL = """
       AND NOT EXISTS (
             SELECT 1 FROM alert_deliveries d2 JOIN events e2 ON e2.id = d2.event_id
@@ -311,7 +314,14 @@ def enqueue(cur, event_id, community_id, camera_id, user_id, level):
               "cooldown": COOLDOWN[level], "owner": owner, "community": str(community_id), "audience": audience}
     sql = _ENQUEUE_HEAD + (_TO_ADMINS if a_admins else _TO_OWNER) + _ENQUEUE_TAIL
     cur.execute(sql, params)
-    return cur.rowcount
+    total = cur.rowcount
+    if comun and audience == "normal":                  # los vigilantes reciben las alertas de las zonas comunes
+        cur.execute(_ENQUEUE_HEAD + _TO_GUARDS + _ENQUEUE_TAIL, params)
+        total += cur.rowcount
+    if owner and camera_id:                             # los familiares, las de las cámaras que su vecino les compartió
+        cur.execute(_ENQUEUE_HEAD + _TO_FAMILY + _ENQUEUE_TAIL, params)
+        total += cur.rowcount
+    return total
 
 
 # ------------------------------------------------------------------ envío

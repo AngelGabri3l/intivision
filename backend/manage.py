@@ -500,7 +500,8 @@ def main():
 
     p = sub.add_parser("create-user")
     p.add_argument("--community-slug", required=True)
-    p.add_argument("--role", choices=auth.ROLES, default="resident")
+    p.add_argument("--role", choices=("resident", "community_admin", "guard"), default="resident",
+                   help="guard = vigilante (zonas comunes). Los familiares se crean por invitación desde la web.")
     p.add_argument("--name", required=True)
     p.add_argument("--email")
     p.add_argument("--phone")

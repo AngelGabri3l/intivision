@@ -301,7 +301,7 @@ def list_equipos(admin):
                        WHERE s.community_id = %s ORDER BY lower(s.label), s.device_key""", (comunidad,))
         fuentes = [dict(r) for r in cur.fetchall()]
         cur.execute("""SELECT id::text AS id, full_name, role FROM users
-                       WHERE community_id = %s AND status = 'active'
+                       WHERE community_id = %s AND status = 'active' AND role IN ('resident', 'community_admin')
                        ORDER BY (role = 'community_admin'), lower(full_name) LIMIT 500""", (comunidad,))
         personas = [dict(r) for r in cur.fetchall()]
     por_equipo = {}
@@ -342,10 +342,11 @@ def _validate_assignment(cur, admin, data):
         owner = data.get("owner_id")
         if not cameras.is_uuid(owner):
             raise AssignError(422, "Indica el dueño de la cámara (owner_id).", "datos_invalidos")
-        cur.execute("SELECT id::text AS id FROM users WHERE id = %s AND community_id = %s AND status = 'active'",
-                    (owner, admin["community_id"]))
+        cur.execute("""SELECT id::text AS id FROM users WHERE id = %s AND community_id = %s AND status = 'active'
+                         AND role IN ('resident', 'community_admin')""", (owner, admin["community_id"]))
         if cur.fetchone() is None:
-            raise AssignError(422, "Esa persona no existe en tu comunidad o no está activa.", "datos_invalidos")
+            raise AssignError(422, "Esa persona no existe en tu comunidad, no está activa o no puede tener cámaras (vigilante o familiar).",
+                              "datos_invalidos")
     elif data.get("owner_id") not in (None, ""):
         raise AssignError(422, "Una cámara de zona común no tiene dueño.", "datos_invalidos")
     return {"destino": destino, "name": name, "place": place or None, "owner_id": owner}

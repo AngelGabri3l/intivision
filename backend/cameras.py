@@ -8,7 +8,7 @@ import datetime
 import os
 import re
 
-from backend import db, planes
+from backend import acceso, db, planes
 
 MAX_CAMERAS_PER_USER = int(os.environ.get("MAX_CAMERAS_PER_USER", "10"))
 NAME_MIN, NAME_MAX, PLACE_MAX = 2, 60, 80
@@ -68,12 +68,8 @@ _SELECT = """
 
 
 def _scope(user):
-    """Qué cámaras puede ver este usuario: el residente, las suyas; el administrador, las de su comunidad
-    que sean zonas comunes, suyas o que su dueño no le haya ocultado."""
-    if user["role"] == "community_admin":
-        return ("(c.community_id = %s AND (c.kind = 'common' OR c.user_id = %s OR c.admin_can_view))",
-                [user["community_id"], user["id"]])
-    return "c.user_id = %s", [user["id"]]
+    """Qué cámaras puede ver este usuario (las reglas de cada rol están en acceso.py)."""
+    return acceso.posicional(acceso.camaras(user, "c"), user)
 
 
 def list_cameras(user):
