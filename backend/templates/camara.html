@@ -182,6 +182,9 @@ button, input { font: inherit; color: inherit; }
 /* Las tarjetas las genera backend/app.py. JavaScript les quita el estilo en
    línea y les asigna estas clases (ver mejorarEventos). */
 .evento { display: flex; flex-direction: column; border: 1px solid hsl(var(--borde-fuerte)); background: hsl(var(--card)); color: hsl(var(--card-foreground)); border-radius: var(--radius); overflow: hidden; }
+.evento__ia { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid hsl(var(--primary)); font-size: 13px; line-height: 1.45; display: grid; gap: 4px; }
+.evento__ia-rotulo { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.evento__ia-aviso { color: hsl(var(--muted-foreground)); font-style: italic; }
 .evento__zip { display: inline-flex; align-items: center; min-height: 44px; font-size: 13px; color: hsl(var(--primary)); }
 .evento__video { margin-top: 8px; }
 .evento__video summary { cursor: pointer; font-size: 13px; color: hsl(var(--primary)); min-height: 44px; display: flex; align-items: center; }

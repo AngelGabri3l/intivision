@@ -179,7 +179,17 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}{zip_link(r)}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{ia_block(r)}{video_block(r)}{zip_link(r)}</div></div>')
+
+
+def ia_block(r) -> str:
+    """La descripción automática del evento, rotulada como tal (puede equivocarse)."""
+    if not r.get("ai_description"):
+        return ""
+    aviso = ('<span class="evento__ia-aviso">La IA no ve personas: podría ser una falsa alarma.</span>'
+             if r.get("ai_sees_people") is False else "")
+    return (f'<p class="evento__ia"><span class="evento__ia-rotulo">Descripción automática · puede equivocarse</span>'
+            f'{esc(r["ai_description"])}{aviso}</p>')
 
 
 def zip_link(r) -> str:

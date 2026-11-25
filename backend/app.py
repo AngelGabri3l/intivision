@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas, descripciones  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -281,6 +281,7 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
             cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
         if notify:
             alerts.enqueue(cur, event_id, community, camera_id, owner, e.get("level"))
+        descripciones.marcar_si_corresponde(cur, event_id, camera_id, e.get("level"), bool(image))   # IA: solo si el plan lo incluye
     return event_id
 
 
@@ -295,6 +296,7 @@ _EVENTS_SELECT = """
              WHERE m.event_id = e.id AND m.kind = 'image'
              ORDER BY m.created_at LIMIT 1) AS image,
            (SELECT m.storage_key FROM media_files m WHERE m.event_id = e.id AND m.kind = 'clip' LIMIT 1) AS clip,
+           e.ai_description, e.ai_sees_people,
            (c.id IS NOT NULL AND """ + planes.sql_es_premium("c") + """) AS premium,
            e.people_count AS people, e.status,
            c.name AS camera_name,
@@ -782,6 +784,8 @@ def startup():
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
     alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+    if descripciones.configurada():
+        threading.Thread(target=descripciones.ciclo_forever, args=(_parar_suscripciones, EVIDENCE_DIR), name="descripciones-ia", daemon=True).start()
     if os.environ.get("SUSCRIPCIONES_CICLO", "1") != "0":
         threading.Thread(target=suscripciones.ciclo_forever, args=(_parar_suscripciones,), name="suscripciones", daemon=True).start()
 
