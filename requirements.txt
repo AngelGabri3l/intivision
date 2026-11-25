@@ -1,4 +1,4 @@
-ultralytics>=8.3.0
+ultralytics>=8.4.216
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 pyyaml>=6.0
