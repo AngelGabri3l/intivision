@@ -195,7 +195,24 @@ _REPLIES = {
     "taken": "Este chat ya está vinculado a otra cuenta de INTIVISION.",
     "invalid": "Ese enlace no es válido o ya venció. Genera uno nuevo en INTIVISION, en Alertas.",
 }
-_HELP = "Este bot solo envía alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram."
+_HELP = ("Este bot envía las alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram.\n"
+         "Con el Plan Premium puedes preguntar por tus cámaras: /pregunta ¿pasó algo anoche?")
+
+
+def _responder_pregunta(chat_id, pregunta):
+    """«Pregúntale a tus cámaras» por Telegram: solo para chats vinculados, con los permisos y el tope de esa persona."""
+    from backend import asistente
+    try:
+        with db.cursor() as cur:
+            user = asistente.usuario_de_chat(cur, chat_id)
+            if user is None:
+                _reply(chat_id, _HELP)
+                return
+            ok, texto = asistente.responder(cur, user, pregunta, "telegram")
+        _reply(chat_id, ("🤖 " if ok else "") + texto)
+    except Exception:                                      # noqa: BLE001
+        log.exception("Fallo al responder una pregunta por Telegram")
+        _reply(chat_id, "No pude responder ahora. Intenta en un momento.")
 
 
 def handle_update(update):
@@ -210,6 +227,14 @@ def handle_update(update):
         _reply(chat["id"], "INTIVISION solo se vincula desde un chat privado con el bot.")
         return
     texto = (msg.get("text") or "").strip()
+    comando = texto.split(maxsplit=1)[0] if texto else ""
+    if comando == "/pregunta" or comando.startswith("/pregunta@"):      # en grupos Telegram agrega @nombre_del_bot
+        partes = texto.split(maxsplit=1)
+        if len(partes) == 1:
+            _reply(chat["id"], "Escribe tu pregunta después del comando, por ejemplo: /pregunta ¿pasó algo anoche?")
+        else:
+            threading.Thread(target=_responder_pregunta, args=(chat["id"], partes[1]), daemon=True).start()
+        return
     if texto.split(maxsplit=1)[:1] == ["/start"]:
         partes = texto.split(maxsplit=1)
         if len(partes) == 1:

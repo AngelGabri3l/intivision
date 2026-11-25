@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
 from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas, descripciones  # noqa: E402
+from backend import asistente, comunicados  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -735,6 +736,74 @@ def invitacion_aceptar(token: str, request: Request, nueva: str = Form(""), conf
     return response
 
 
+# ---------------------- comunicados vecinales y «Pregúntale a tus cámaras» ----------------------
+
+COMUNICADOS_NOTICES = {"vacio": ("error", "Escribe primero la idea del comunicado.")}
+
+
+def _comunicados_response(request, user, notice=None, borrador=None, status=200):
+    with db.cursor() as cur:
+        lista = comunicados.listar(cur, user)
+        alcances = {a: comunicados.alcance(cur, user, a) for a in comunicados.AUDIENCIAS} if user["role"] == "community_admin" else None
+    return HTMLResponse(pwa.inject(pages.render_comunicados(user, lista, notice, borrador, alcances, descripciones.configurada()),
+                                   request.state.csp_nonce), status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/comunicados", response_class=HTMLResponse)
+def comunicados_page(request: Request, m: str = "", p: str = "", t: str = "", user: dict = Depends(auth.current_user)):
+    notice = COMUNICADOS_NOTICES.get(m)
+    if m == "enviado" and p.isdigit() and t.isdigit():
+        notice = ("ok", f"Comunicado enviado: le llega por Telegram a {int(t)} de {int(p)} personas, y todas lo ven aquí.")
+    return _comunicados_response(request, user, notice)
+
+
+@app.post("/comunicados/redactar", response_class=HTMLResponse)
+def comunicados_redactar(request: Request, idea: str = Form(""), user: dict = Depends(auth.require_admin)):
+    """La IA propone el comunicado; el administrador lo revisa y edita antes de enviarlo (nunca se envía solo)."""
+    try:
+        b = comunicados.redactar(idea)
+    except comunicados.ErrorComunicado as e:
+        return _comunicados_response(request, user, ("error", str(e)), {"idea": idea[:1500]}, status=422)
+    return _comunicados_response(request, user, ("ok", "Borrador listo: revísalo y edítalo antes de enviar."),
+                                 {"idea": idea[:1500], "titulo": b["titulo"], "mensaje": b["mensaje"], "ai": True})
+
+
+@app.post("/comunicados/enviar", response_class=HTMLResponse)
+def comunicados_enviar(request: Request, titulo: str = Form(""), mensaje: str = Form(""), audiencia: str = Form("todos"), ai: str = Form("0"),
+                       user: dict = Depends(auth.require_admin)):
+    try:
+        with db.cursor() as cur:
+            r = comunicados.publicar(cur, user, titulo, mensaje, audiencia, ai == "1")
+    except comunicados.ErrorComunicado as e:
+        return _comunicados_response(request, user, ("error", str(e)),
+                                     {"titulo": titulo[:120], "mensaje": mensaje[:1500], "audiencia": audiencia, "ai": ai == "1"}, status=422)
+    return RedirectResponse(f"/comunicados?m=enviado&p={r['personas']}&t={r['telegram']}", status_code=303)
+
+
+def _asistente_response(request, user, notice=None, pregunta="", respuesta=None, status=200):
+    with db.cursor() as cur:
+        limite, usadas = asistente.cupo(cur, user)
+        previas = asistente.recientes(cur, user)
+    return HTMLResponse(pwa.inject(pages.render_asistente(user, limite, usadas, previas, notice, pregunta, respuesta), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/asistente", response_class=HTMLResponse)
+def asistente_page(request: Request, user: dict = Depends(auth.current_user)):
+    return _asistente_response(request, user)
+
+
+@app.post("/asistente", response_class=HTMLResponse)
+def asistente_preguntar(request: Request, pregunta: str = Form(""), ejemplo: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Responde con datos de solo lectura y los permisos de la persona (acceso.py). No cambia nada."""
+    pregunta = (ejemplo or pregunta)[:500]
+    with db.cursor() as cur:
+        ok, texto = asistente.responder(cur, user, pregunta, "web")
+    if not ok:
+        return _asistente_response(request, user, ("alerta", texto), pregunta, status=200)
+    return _asistente_response(request, user, None, pregunta, texto)
+
+
 @app.post("/logout/todos")
 def logout_all(request: Request, user: dict = Depends(auth.current_user)):
     """Cierra la sesión de la persona en todos sus dispositivos (también en este). Queda en audit_log, solo con cuántas eran."""
@@ -787,6 +856,7 @@ def startup():
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
     alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+    threading.Thread(target=comunicados.ciclo_forever, args=(_parar_suscripciones,), name="comunicados", daemon=True).start()
     if descripciones.configurada():
         threading.Thread(target=descripciones.ciclo_forever, args=(_parar_suscripciones, EVIDENCE_DIR), name="descripciones-ia", daemon=True).start()
     if os.environ.get("SUSCRIPCIONES_CICLO", "1") != "0":

@@ -112,6 +112,7 @@ def menu_usuario(user, active) -> str:
             f'<div class="menu-usuario__cabecera"><strong>{esc(nombre)}</strong><span>{role_text(user)}</span></div>'
             + (enlace("/plan", "Mi plan", "plan") + enlace("/familia", "Mi familia", "familia")
                if user.get("role") in ("resident", "community_admin") else "")
+            + enlace("/asistente", "Pregúntale a tus cámaras", "asistente") + enlace("/comunicados", "Comunicados", "comunicados")
             + enlace("/cuenta/contrasena", "Cambiar contraseña", "cuenta")
             + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
             + '<form method="post" action="/logout"><button class="menu-usuario__salir" type="submit">Cerrar sesión</button></form>'
@@ -955,3 +956,80 @@ def render_invitacion(inv=None, error=None, token="") -> str:
                   + '<div><button class="btn" type="submit">Crear mi cuenta</button></div></form>')
     return fill(read_template("recuperar.html"), contenido='<div class="contenedor analisis">' + cuerpo + "</div>").replace(
         "<title>Recuperar contraseña · INTIVISION</title>", "<title>Invitación · INTIVISION</title>", 1)
+
+
+
+# ------------------------------------------------------------------ comunicados y asistente
+
+def _parrafos(texto) -> str:
+    return esc(texto or "")
+
+
+def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, ia_disponible=False) -> str:
+    from backend import comunicados as com
+    componer = ""
+    if user["role"] == "community_admin":
+        b = borrador or {}
+        opciones = "".join(
+            f'<option value="{a}"{" selected" if a == b.get("audiencia", "todos") else ""}>{com.AUDIENCIA_TEXTO[a]} · '
+            f'{(alcances or {}).get(a, {}).get("total", 0)} personas, {(alcances or {}).get(a, {}).get("telegram", 0)} con Telegram</option>'
+            for a in com.AUDIENCIAS)
+        idea = ('<form method="post" action="/comunicados/redactar" class="form-columna">'
+                '<label for="idea">1. Escribe la idea con tus palabras</label>'
+                f'<textarea id="idea" name="idea" maxlength="1500" placeholder="Ej.: reunión de la junta el sábado a las 7 pm en el parque para hablar de la cámara nueva">{esc(b.get("idea", ""))}</textarea>'
+                + ('<div><button class="btn" type="submit">Redactar con IA</button></div>' if ia_disponible else
+                   '<p class="analisis__descripcion">La IA no está configurada en este servidor: escribe el comunicado directamente abajo.</p>')
+                + '</form>')
+        envio = ('<form method="post" action="/comunicados/enviar" class="form-columna">'
+                 '<label for="titulo">2. Revisa y edita antes de enviar · Título</label>'
+                 f'<input id="titulo" name="titulo" maxlength="120" required value="{esc(b.get("titulo", ""))}">'
+                 '<label for="mensaje">Mensaje</label>'
+                 f'<textarea id="mensaje" name="mensaje" maxlength="1500" required>{esc(b.get("mensaje", ""))}</textarea>'
+                 f'<label for="audiencia">¿A quién?</label><select id="audiencia" name="audiencia">{opciones}</select>'
+                 f'<input type="hidden" name="ai" value="{"1" if b.get("ai") else "0"}">'
+                 '<div><button class="btn" type="submit">Enviar a la comunidad</button></div>'
+                 '<p class="analisis__descripcion">Llega a la vez por Telegram a quienes lo tienen vinculado, y todos lo ven aquí, en «Comunicados».</p></form>')
+        componer = idea + envio
+    tarjetas = []
+    for c in lista:
+        meta = f'{esc(suscripciones_fecha(c["created_at"]))} · {esc(c["autor"] or "Administración")} · {com.AUDIENCIA_TEXTO.get(c["audience"], "")}'
+        if user["role"] == "community_admin":
+            meta += f' · llegó por Telegram a {c["enviados"]} de {c["recipients"]}'
+        tarjetas.append(f'<article class="tarjeta-comunicado"><h3>{esc(c["title"])}</h3><span class="tarjeta-comunicado__meta">{meta}'
+                        + (' <span class="marca-ia">redactado con IA</span>' if c["ai_assisted"] else "")
+                        + f'</span><p class="tarjeta-comunicado__cuerpo">{_parrafos(c["body"])}</p></article>')
+    listado = ('<div class="lista-comunicados">' + "".join(tarjetas) + "</div>") if tarjetas else \
+        '<p class="analisis__descripcion">Todavía no hay comunicados.</p>'
+    return fill(read_template("comunicados.html"), nav=nav(user, "comunicados"),
+                descripcion=("Avisos de la junta para toda la comunidad." if user["role"] != "community_admin" else
+                             "Escribe la idea, deja que la IA la redacte, revísala y envíala a toda la comunidad a la vez."),
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=componer,
+                secciones=_seccion("lista-comunicados", "Comunicados", listado))
+
+
+def render_asistente(user, limite, usadas, recientes, notice=None, pregunta="", respuesta=None) -> str:
+    if limite <= 0:
+        destino = ('<a class="btn" href="/plan">Ver el Plan Premium</a>' if user.get("role") in ("resident", "community_admin") else
+                   '<p class="analisis__descripcion">Pídele a tu vecino o a la administración que activen el Plan Premium.</p>')
+        cuerpo = ('<div class="form-columna"><p class="analisis__descripcion">Pregunta en tus propias palabras: «¿Pasó algo anoche?», '
+                  '«¿Cuántas alertas hubo esta semana en el portón?». Es parte del Plan Premium.</p>' + destino + '</div>')
+        return fill(read_template("asistente.html"), nav=nav(user, "asistente"), descripcion="Tus cámaras responden tus preguntas.",
+                    aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=cuerpo, secciones="")
+    ejemplos = ("¿Pasó algo anoche?", "¿Cuántas alertas hubo esta semana y en qué cámara?", "¿A qué hora suele haber más alertas?",
+                "¿Hubo alguna alerta de nivel alto hoy?")
+    formulario = ('<form method="post" action="/asistente" class="form-columna"><label for="pregunta">Tu pregunta</label>'
+                  f'<textarea id="pregunta" name="pregunta" maxlength="500" required>{esc(pregunta)}</textarea>'
+                  '<div class="ejemplos">' + "".join(f'<button type="submit" name="ejemplo" value="{esc(e)}">{esc(e)}</button>' for e in ejemplos)
+                  + '</div><div><button class="btn" type="submit">Preguntar</button></div>'
+                  f'<p class="analisis__descripcion">Hoy te quedan {max(0, limite - usadas)} de {limite} preguntas. También puedes preguntar en Telegram: '
+                  '<strong>/pregunta</strong> seguido de tu pregunta.</p></form>')
+    if respuesta is not None:
+        formulario += ('<div class="form-columna"><span class="marca-ia">respuesta de la IA · verifica en el historial</span>'
+                       f'<div class="respuesta-ia">{esc(respuesta)}</div></div>')
+    previas = "".join(f'<article class="tarjeta-comunicado"><h3>{esc(r["question"])}</h3>'
+                      f'<span class="tarjeta-comunicado__meta">{esc(suscripciones_fecha(r["created_at"]))}</span>'
+                      f'<p class="tarjeta-comunicado__cuerpo">{esc(r["answer"] or "")}</p></article>' for r in recientes)
+    secciones = _seccion("asistente-recientes", "Tus últimas preguntas", f'<div class="lista-comunicados">{previas}</div>') if recientes else ""
+    return fill(read_template("asistente.html"), nav=nav(user, "asistente"),
+                descripcion="Pregunta en tus palabras. Respondo solo con lo que puedes ver en INTIVISION; nunca cambio nada.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=formulario, secciones=secciones)
