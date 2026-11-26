@@ -549,3 +549,161 @@ CREATE INDEX IF NOT EXISTS ix_checkout_provider_ref ON checkout_sessions (provid
 CREATE INDEX IF NOT EXISTS ix_payments_provider_ref ON payments (provider_ref) WHERE provider_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_subscriptions_provider_ref ON subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_community_subs_provider_ref ON community_subscriptions (provider_ref) WHERE provider_ref IS NOT NULL;
+
+-- ------------------------------------------------------------------ 013 · recuperar la contraseña (igual que la migración 013)
+CREATE TABLE IF NOT EXISTS password_resets (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token_hash   text        NOT NULL UNIQUE,                       -- sha256 del enlace
+    channel      text        NOT NULL DEFAULT 'telegram' CHECK (channel IN ('telegram', 'soporte')),
+    requested_ip inet,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    expires_at   timestamptz NOT NULL,
+    used_at      timestamptz
+);
+CREATE INDEX IF NOT EXISTS ix_password_resets_user ON password_resets (user_id, created_at DESC);
+
+-- ------------------------------------------------------------------ 014 · gestión de personas (igual que la migración 014)
+-- Roles nuevos: guard (vigilante: zonas comunes) y family (familiar: lo que su vecino le comparte)
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('resident', 'community_admin', 'guard', 'family'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sponsor_id uuid REFERENCES users (id) ON DELETE SET NULL;   -- el vecino de un familiar
+ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by uuid REFERENCES users (id) ON DELETE SET NULL;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_family_sponsor') THEN
+        ALTER TABLE users ADD CONSTRAINT ck_users_family_sponsor CHECK (role <> 'family' OR sponsor_id IS NOT NULL OR status <> 'active');
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_users_sponsor ON users (sponsor_id) WHERE sponsor_id IS NOT NULL;
+
+-- Cámaras que un vecino comparte con un familiar
+CREATE TABLE IF NOT EXISTS camera_shares (
+    camera_id  uuid        NOT NULL REFERENCES cameras (id) ON DELETE CASCADE,
+    user_id    uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    granted_by uuid        REFERENCES users (id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (camera_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS ix_camera_shares_user ON camera_shares (user_id);
+
+-- Invitaciones: el enlace se guarda como huella SHA-256, vale 72 horas y se usa una vez
+CREATE TABLE IF NOT EXISTS invitations (
+    id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    community_id     uuid        NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
+    invited_by       uuid        REFERENCES users (id) ON DELETE SET NULL,
+    role             text        NOT NULL CHECK (role IN ('resident', 'community_admin', 'guard', 'family')),
+    full_name        text        NOT NULL CHECK (length(full_name) BETWEEN 1 AND 120),
+    email            text,
+    phone            text,
+    sponsor_id       uuid        REFERENCES users (id) ON DELETE CASCADE,
+    camera_ids       uuid[]      NOT NULL DEFAULT '{}',
+    token_hash       text        NOT NULL UNIQUE,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    expires_at       timestamptz NOT NULL,
+    accepted_at      timestamptz,
+    accepted_user_id uuid        REFERENCES users (id) ON DELETE SET NULL,
+    revoked_at       timestamptz,
+    CONSTRAINT ck_invitations_contacto CHECK (email IS NOT NULL OR phone IS NOT NULL),
+    CONSTRAINT ck_invitations_familia CHECK ((role = 'family') = (sponsor_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS ix_invitations_community ON invitations (community_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_invitations_sponsor ON invitations (sponsor_id) WHERE sponsor_id IS NOT NULL;
+
+-- ------------------------------------------------------------------ 015 · descripción con IA (igual que la migración 015)
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS ai_description text    NOT NULL DEFAULT 'none',   -- none | short | detailed
+    ADD COLUMN IF NOT EXISTS ai_daily_cap   integer NOT NULL DEFAULT 0;        -- descripciones por día y comunidad
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_plans_ai_description') THEN
+        ALTER TABLE plans ADD CONSTRAINT ck_plans_ai_description CHECK (ai_description IN ('none', 'short', 'detailed'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_plans_ai_daily_cap') THEN
+        ALTER TABLE plans ADD CONSTRAINT ck_plans_ai_daily_cap CHECK (ai_daily_cap BETWEEN 0 AND 100000);
+    END IF;
+END $$;
+UPDATE plans SET ai_description = 'short',    ai_daily_cap = 20  WHERE code = 'base';
+UPDATE plans SET ai_description = 'detailed', ai_daily_cap = 500 WHERE code = 'premium';
+
+-- La descripción de cada evento
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS ai_status       text,          -- pendiente | hecha | omitida | error
+    ADD COLUMN IF NOT EXISTS ai_detail       text,          -- short | detailed
+    ADD COLUMN IF NOT EXISTS ai_description  text,
+    ADD COLUMN IF NOT EXISTS ai_sees_people  boolean,       -- false: la IA no ve personas (posible falsa alarma)
+    ADD COLUMN IF NOT EXISTS ai_attempts     smallint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS ai_described_at timestamptz;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_events_ai_status') THEN
+        ALTER TABLE events ADD CONSTRAINT ck_events_ai_status CHECK (ai_status IS NULL OR ai_status IN ('pendiente', 'hecha', 'omitida', 'error'));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_events_ai_pendiente ON events (id) WHERE ai_status = 'pendiente';
+CREATE INDEX IF NOT EXISTS ix_events_ai_busqueda ON events USING gin (to_tsvector('spanish', coalesce(ai_description, '')));
+
+-- Envío por Telegram, como respuesta al aviso con foto
+ALTER TABLE alert_deliveries
+    ADD COLUMN IF NOT EXISTS desc_status   text,
+    ADD COLUMN IF NOT EXISTS desc_attempts smallint NOT NULL DEFAULT 0;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_alert_deliveries_desc') THEN
+        ALTER TABLE alert_deliveries ADD CONSTRAINT ck_alert_deliveries_desc
+            CHECK (desc_status IS NULL OR desc_status IN ('pendiente', 'enviado', 'omitido', 'error'));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_deliveries_desc ON alert_deliveries (id) WHERE desc_status = 'pendiente';
+
+-- El dueño (o el administrador, en zonas comunes) puede apagarla en una cámara
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS ai_enabled boolean NOT NULL DEFAULT true;
+
+-- ------------------------------------------------------------------ 016 · asistente y comunicados (igual que la migración 016)
+-- Preguntas al asistente por persona y por día, según el plan (0 = sin asistente)
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS ai_assistant_daily integer NOT NULL DEFAULT 0;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_plans_ai_assistant_daily') THEN
+        ALTER TABLE plans ADD CONSTRAINT ck_plans_ai_assistant_daily CHECK (ai_assistant_daily BETWEEN 0 AND 10000);
+    END IF;
+END $$;
+UPDATE plans SET ai_assistant_daily = 0  WHERE code = 'base';
+UPDATE plans SET ai_assistant_daily = 30 WHERE code = 'premium';
+
+-- Registro de preguntas y respuestas (para auditoría y para contar el tope diario)
+CREATE TABLE IF NOT EXISTS assistant_queries (
+    id           bigserial   PRIMARY KEY,
+    user_id      uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    community_id uuid        NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
+    channel      text        NOT NULL CHECK (channel IN ('web', 'telegram')),
+    question     text        NOT NULL,
+    answer       text,
+    tools_used   jsonb       NOT NULL DEFAULT '[]',
+    status       text        NOT NULL CHECK (status IN ('ok', 'error', 'limite')),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_assistant_queries_user ON assistant_queries (user_id, created_at DESC);
+
+-- Comunicados de la administración
+CREATE TABLE IF NOT EXISTS announcements (
+    id           bigserial   PRIMARY KEY,
+    community_id uuid        NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
+    author_id    uuid        REFERENCES users (id) ON DELETE SET NULL,
+    audience     text        NOT NULL CHECK (audience IN ('todos', 'vecinos', 'vigilantes', 'administradores')),
+    title        text        NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
+    body         text        NOT NULL CHECK (length(body) BETWEEN 1 AND 1500),
+    ai_assisted  boolean     NOT NULL DEFAULT false,
+    recipients   integer     NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_announcements_community ON announcements (community_id, created_at DESC);
+
+-- Un envío por Telegram por persona y comunicado
+CREATE TABLE IF NOT EXISTS announcement_deliveries (
+    id                  bigserial   PRIMARY KEY,
+    announcement_id     bigint      NOT NULL REFERENCES announcements (id) ON DELETE CASCADE,
+    user_id             uuid        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    channel_id          uuid        NOT NULL REFERENCES notification_channels (id) ON DELETE CASCADE,
+    status              text        NOT NULL DEFAULT 'pendiente' CHECK (status IN ('pendiente', 'enviado', 'omitido', 'error')),
+    attempts            smallint    NOT NULL DEFAULT 0,
+    telegram_message_id bigint,
+    sent_at             timestamptz,
+    UNIQUE (announcement_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS ix_announcement_deliveries_pendiente ON announcement_deliveries (id) WHERE status = 'pendiente';

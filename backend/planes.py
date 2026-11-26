@@ -10,7 +10,8 @@ import datetime
 
 PLANES = ("base", "premium")
 COLUMNAS = ("code, name, price_pen_cents, ai_detection, realtime_alerts, highlight_clips, event_history, weapon_detection, "
-            "high_precision, clip_seconds, retention_days, weekly_report, evidence_export")
+            "high_precision, clip_seconds, retention_days, weekly_report, evidence_export, ai_description, ai_daily_cap, "
+            "ai_assistant_daily")
 _ACTIVA = "ps.status IN ('active', 'trialing') AND (ps.current_period_end IS NULL OR ps.current_period_end > now())"
 
 

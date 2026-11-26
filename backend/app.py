@@ -21,7 +21,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
-from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago  # noqa: E402
+from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas, descripciones  # noqa: E402
+from backend import asistente, comunicados  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -281,6 +282,7 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
             cur.execute("UPDATE cameras SET last_seen_at = now() WHERE id = %s", (camera_id,))
         if notify:
             alerts.enqueue(cur, event_id, community, camera_id, owner, e.get("level"))
+        descripciones.marcar_si_corresponde(cur, event_id, camera_id, e.get("level"), bool(image))   # IA: solo si el plan lo incluye
     return event_id
 
 
@@ -295,6 +297,7 @@ _EVENTS_SELECT = """
              WHERE m.event_id = e.id AND m.kind = 'image'
              ORDER BY m.created_at LIMIT 1) AS image,
            (SELECT m.storage_key FROM media_files m WHERE m.event_id = e.id AND m.kind = 'clip' LIMIT 1) AS clip,
+           e.ai_description, e.ai_sees_people,
            (c.id IS NOT NULL AND """ + planes.sql_es_premium("c") + """) AS premium,
            e.people_count AS people, e.status,
            c.name AS camera_name,
@@ -306,18 +309,17 @@ _EVENTS_SELECT = """
     WHERE """
 
 
-def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=None):
+def list_events(user, limit=100, camera_id=None, level=None, desde=None, hasta=None, texto=None):
     """
     Residente: los eventos suyos o de sus cámaras. Administrador: los de su comunidad, salvo los de cámaras
     que su dueño le oculta. Opcional: una sola cámara, un nivel o un rango de fechas (hora de Lima).
     """
     limit = max(1, min(int(limit), 500))
-    if user["role"] == "community_admin":
-        condiciones = ["e.community_id = %s AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)"]
-        args = [user["community_id"], user["id"]]
-    else:
-        condiciones = ["(e.user_id = %s OR c.user_id = %s)"]
-        args = [user["id"], user["id"]]
+    alcance, args = acceso.posicional(acceso.eventos(user, "e", "c"), user)        # qué eventos ve cada rol: acceso.py
+    condiciones = [alcance]
+    if texto:                                     # búsqueda en las descripciones con IA (Premium), en español
+        condiciones.append("to_tsvector('spanish', coalesce(e.ai_description, '')) @@ plainto_tsquery('spanish', %s)")
+        args.append(texto)
     if camera_id:
         condiciones.append("e.camera_id = %s")
         args.append(camera_id)
@@ -417,6 +419,7 @@ LOGIN_NOTICES = {
     "expirada": ("Tu sesión terminó por inactividad. Inicia sesión de nuevo.", "alerta"),
     "cerrada": ("Tu sesión se cerró desde otro dispositivo. Inicia sesión de nuevo.", "alerta"),
     "todas": ("Cerraste sesión en todos tus dispositivos.", "ok"),
+    "clave_cambiada": ("Tu contraseña se cambió. Inicia sesión con la nueva.", "ok"),
     "baja": ("Te diste de baja de INTIVISION: tu cuenta se cerró y tus cámaras quedaron sin asignar. Gracias por usar el servicio.", "ok"),
 }
 
@@ -461,6 +464,344 @@ def login_submit(request: Request, identifier: str = Form(""), password: str = F
 def session_ping(user: dict = Depends(auth.current_user)):
     """El navegador avisa que la persona sigue ahí (clic, tecla, toque): ser un POST es lo que renueva su inactividad."""
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------- contraseña: cambiar (con sesión) y recuperar (sin sesión) ----------------------
+
+CUENTA_NOTICES = {"ok": ("ok", "Contraseña cambiada. Cerramos tus sesiones en los demás dispositivos.")}
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,80}")
+_PAGINA_PRIVADA = {"Cache-Control": "no-store"}            # la política de referencia (same-origin) la pone el filtro de seguridad de todas las páginas
+
+
+def _avisar_por_telegram(user_id, texto):
+    threading.Thread(target=alerts.notify_user, args=(user_id, texto), daemon=True).start()
+
+
+def _cuenta_response(request, user, notice=None, status=200):
+    return HTMLResponse(pwa.inject_sesion(pages.render_cuenta_contrasena(user, notice), request.state.csp_nonce), status_code=status, headers=_PAGINA_PRIVADA)
+
+
+@app.get("/cuenta/contrasena", response_class=HTMLResponse)
+def cuenta_contrasena_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    return _cuenta_response(request, user, CUENTA_NOTICES.get(m))
+
+
+@app.post("/cuenta/contrasena", response_class=HTMLResponse)
+def cuenta_contrasena_guardar(request: Request, actual: str = Form(""), nueva: str = Form(""), confirmacion: str = Form(""),
+                              user: dict = Depends(auth.current_user)):
+    """Cambia la contraseña: pide la actual (los errores cuentan para el bloqueo), cierra las demás sesiones y avisa por Telegram."""
+    ip = auth.client_ip(request)
+    if auth.throttled(ip):
+        return _cuenta_response(request, user, ("alerta", "Demasiados intentos desde esta conexión. Espera unos minutos."), 429)
+    with db.cursor() as cur:
+        ok, mensaje, _cerradas = cuenta.cambiar(cur, user, actual, nueva, confirmacion, request.cookies.get(auth.SESSION_COOKIE), ip)
+    if not ok:
+        if "actual no es correcta" in (mensaje or ""):
+            auth.register_failure(ip)
+        return _cuenta_response(request, user, ("error", mensaje), 400)
+    _avisar_por_telegram(user["id"], "🔒 Tu contraseña de INTIVISION se cambió. Si no fuiste tú, avisa de inmediato al administrador de tu comunidad.")
+    return RedirectResponse("/cuenta/contrasena?m=ok", status_code=303)
+
+
+@app.get("/recuperar", response_class=HTMLResponse)
+def recuperar_page():
+    return HTMLResponse(pages.render_recuperar("pedir"), headers=_PAGINA_PRIVADA)
+
+
+@app.post("/recuperar", response_class=HTMLResponse)
+def recuperar_pedir(request: Request, identifier: str = Form("")):
+    """
+    Pide el enlace de recuperación. La respuesta es la MISMA exista o no la cuenta, tenga o no Telegram: así nadie puede averiguar
+    qué cuentas existen. Hay un límite por conexión y otro por cuenta.
+    """
+    ip = auth.client_ip(request)
+    if cuenta.ip_limitada(ip):
+        return HTMLResponse(pages.render_recuperar("pedir", "Demasiados pedidos desde esta conexión. Espera unos minutos.", identifier=identifier[:254]),
+                            status_code=429, headers=_PAGINA_PRIVADA)
+    try:
+        with db.cursor() as cur:
+            resultado = cuenta.solicitar(cur, identifier, ip)
+    except psycopg2.OperationalError:
+        return HTMLResponse(pages.render_recuperar("pedir", "El servicio no está disponible. Inténtalo en unos minutos."), status_code=503, headers=_PAGINA_PRIVADA)
+    if resultado:
+        user_id, token = resultado
+        _avisar_por_telegram(user_id, f"🔑 Pediste cambiar tu contraseña de INTIVISION. Abre este enlace (vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez):\n"
+                                      f"{_base_publica(request)}/recuperar/{token}\nSi no fuiste tú, ignora este mensaje.")
+    return HTMLResponse(pages.render_recuperar("enviado"), headers=_PAGINA_PRIVADA)
+
+
+@app.get("/recuperar/{token}", response_class=HTMLResponse)
+def recuperar_con_enlace(token: str):
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    with db.cursor() as cur:
+        fila = cuenta.valido(cur, token)
+    if fila is None:
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    return HTMLResponse(pages.render_recuperar("nueva", token=token), headers=_PAGINA_PRIVADA)
+
+
+@app.post("/recuperar/{token}", response_class=HTMLResponse)
+def recuperar_guardar(token: str, request: Request, nueva: str = Form(""), confirmacion: str = Form("")):
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_recuperar("invalido"), status_code=404, headers=_PAGINA_PRIVADA)
+    with db.cursor() as cur:
+        ok, mensaje, user_id = cuenta.restablecer(cur, token, nueva, confirmacion, auth.client_ip(request))
+    if not ok:
+        if "ya no sirve" in (mensaje or ""):
+            return HTMLResponse(pages.render_recuperar("invalido"), status_code=400, headers=_PAGINA_PRIVADA)
+        return HTMLResponse(pages.render_recuperar("nueva", mensaje, token=token), status_code=422, headers=_PAGINA_PRIVADA)
+    _avisar_por_telegram(user_id, "🔒 Tu contraseña de INTIVISION se cambió y cerramos tus sesiones. Si no fuiste tú, avisa de inmediato al administrador de tu comunidad.")
+    return RedirectResponse("/login?m=clave_cambiada", status_code=303)
+
+
+# ---------------------- personas (administrador), familia (vecino) e invitaciones ----------------------
+
+PERSONAS_NOTICES = {
+    "suspendida": ("ok", "Cuenta suspendida: se cerraron sus sesiones."), "reactivada": ("ok", "Cuenta reactivada."),
+    "rol": ("ok", "Rol cambiado. Sus sesiones se cerraron para que entre con el rol nuevo."), "sesiones": ("ok", "Se cerraron sus sesiones."),
+    "baja": ("ok", "La persona quedó dada de baja: sus cámaras están sin asignar en «Equipos»."), "revocada": ("ok", "Invitación revocada."),
+    "confirmacion": ("error", "Para dar de baja escribe exactamente BAJA."), "no_existe": ("error", "No existe esa invitación o persona."),
+    "familiar_quitado": ("ok", "Familiar quitado: ya no ve tus cámaras."), "camaras": ("ok", "Cámaras compartidas actualizadas."),
+}
+
+
+def _enlace_invitacion(request, nombre, token, telefono):
+    telefono = re.sub(r"\D", "", telefono or "") or None              # wa.me usa solo dígitos, con el código de país
+    return {"titulo": f"Invitación para {nombre}", "url": f"{_base_publica(request)}/invitacion/{token}", "telefono": telefono,
+            "mensaje": "Te invito a INTIVISION. Crea tu cuenta aquí:", "vigencia": f"Vale {personas.INVITACION_HORAS} horas y se usa una sola vez."}
+
+
+def _personas_response(request, user, notice=None, enlace=None, status=200):
+    with db.cursor() as cur:
+        lista, pend = personas.listar(cur, user), personas.pendientes(cur, user)
+    return HTMLResponse(pwa.inject(pages.render_personas(user, lista, pend, notice, enlace), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin/personas", response_class=HTMLResponse)
+def personas_page(request: Request, m: str = "", user: dict = Depends(auth.require_admin)):
+    return _personas_response(request, user, PERSONAS_NOTICES.get(m))
+
+
+@app.post("/admin/personas/invitar", response_class=HTMLResponse)
+def personas_invitar(request: Request, nombre: str = Form(""), email: str = Form(""), phone: str = Form(""), rol: str = Form("resident"),
+                     user: dict = Depends(auth.require_admin)):
+    if rol not in personas.ROLES_QUE_INVITA_EL_ADMIN:
+        return _personas_response(request, user, ("error", "Rol no válido. Los familiares los invita cada vecino desde «Mi familia»."), status=400)
+    try:
+        with db.cursor() as cur:
+            _, token = personas.invitar(cur, user, nombre, email, phone, rol)
+    except personas.ErrorPersonas as e:
+        return _personas_response(request, user, ("error", e.mensaje), status=e.status)
+    return _personas_response(request, user, ("ok", "Invitación creada."), _enlace_invitacion(request, " ".join(nombre.split()), token, phone.strip() or None))
+
+
+@app.post("/admin/personas/invitaciones/{inv_id}/{accion}", response_class=HTMLResponse)
+def personas_invitacion(inv_id: str, accion: str, request: Request, user: dict = Depends(auth.require_admin)):
+    return _invitacion_accion(request, user, inv_id, accion, "/admin/personas", _personas_response)
+
+
+def _invitacion_accion(request, user, inv_id, accion, volver, responder):
+    with db.cursor() as cur:
+        if accion == "revocar":
+            ok = personas.revocar(cur, user, inv_id)
+            return RedirectResponse(f"{volver}?m={'revocada' if ok else 'no_existe'}", status_code=303)
+        if accion == "reenviar":
+            cur.execute("SELECT full_name, phone FROM invitations WHERE id::text = %s", (inv_id,))
+            datos = cur.fetchone()
+            token = personas.reenviar(cur, user, inv_id)
+    if accion != "reenviar" or token is None:
+        return RedirectResponse(f"{volver}?m=no_existe", status_code=303)
+    return responder(request, user, ("ok", "Nuevo enlace creado; el anterior ya no sirve."), _enlace_invitacion(request, datos["full_name"], token, datos["phone"]))
+
+
+@app.post("/admin/personas/{uid}/{accion}", response_class=HTMLResponse)
+def personas_accion(uid: str, accion: str, request: Request, rol: str = Form(""), confirmacion: str = Form(""),
+                    user: dict = Depends(auth.require_admin)):
+    """Suspender, reactivar, cambiar el rol, enlace de contraseña, cerrar sesiones o dar de baja a una persona de la comunidad."""
+    try:
+        with db.cursor() as cur:
+            if accion in ("suspender", "reactivar"):
+                personas.cambiar_estado(cur, user, uid, accion == "reactivar")
+                destino = "suspendida" if accion == "suspender" else "reactivada"
+            elif accion == "rol":
+                personas.cambiar_rol(cur, user, uid, rol)
+                destino = "rol"
+            elif accion == "sesiones":
+                personas.cerrar_sesiones(cur, user, uid)
+                destino = "sesiones"
+            elif accion == "enlace":
+                nombre, token = personas.enlace_contrasena(cur, user, uid)
+                destino = None
+            elif accion == "baja":
+                if confirmacion.strip().upper() != "BAJA":
+                    return RedirectResponse("/admin/personas?m=confirmacion", status_code=303)
+                _, info = personas.dar_de_baja(cur, user, uid)
+                destino = "baja"
+            else:
+                return RedirectResponse("/admin/personas?m=no_existe", status_code=303)
+    except personas.ErrorPersonas as e:
+        return _personas_response(request, user, ("error", e.mensaje), status=e.status)
+    if accion == "baja":
+        threading.Thread(target=suscripciones.enviar_avisos, args=(suscripciones.avisos_de_baja(info),), daemon=True).start()
+    if destino is None:
+        enlace = {"titulo": f"Enlace para que {nombre} cambie su contraseña", "url": f"{_base_publica(request)}/recuperar/{token}", "telefono": None,
+                  "mensaje": "Para cambiar tu contraseña de INTIVISION abre:", "vigencia": f"Vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez."}
+        return _personas_response(request, user, ("ok", "Enlace creado."), enlace)
+    return RedirectResponse(f"/admin/personas?m={destino}", status_code=303)
+
+
+def _familia_response(request, user, notice=None, enlace=None, status=200):
+    with db.cursor() as cur:
+        fam, cams, pend = personas.mis_familiares(cur, user), personas.mis_camaras(cur, user), personas.pendientes(cur, dict(user, role="resident"))
+    return HTMLResponse(pwa.inject(pages.render_familia(user, fam, cams, pend, personas.MAX_FAMILIARES, notice, enlace), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/familia", response_class=HTMLResponse)
+def familia_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    return _familia_response(request, user, PERSONAS_NOTICES.get(m))
+
+
+@app.post("/familia/invitar", response_class=HTMLResponse)
+def familia_invitar(request: Request, nombre: str = Form(""), email: str = Form(""), phone: str = Form(""), camaras: list[str] = Form([]),
+                    user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    try:
+        with db.cursor() as cur:
+            _, token = personas.invitar(cur, user, nombre, email, phone, "family", camaras)
+    except personas.ErrorPersonas as e:
+        return _familia_response(request, user, ("error", e.mensaje), status=e.status)
+    return _familia_response(request, user, ("ok", "Invitación creada."), _enlace_invitacion(request, " ".join(nombre.split()), token, phone.strip() or None))
+
+
+@app.post("/familia/invitaciones/{inv_id}/{accion}", response_class=HTMLResponse)
+def familia_invitacion(inv_id: str, accion: str, request: Request, user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    return _invitacion_accion(request, dict(user, role="resident"), inv_id, accion, "/familia",
+                              lambda req, u, notice, enlace: _familia_response(req, user, notice, enlace))
+
+
+@app.post("/familia/{fid}/{accion}", response_class=HTMLResponse)
+def familia_accion(fid: str, accion: str, request: Request, camaras: list[str] = Form([]), user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):
+        return RedirectResponse("/cameras", status_code=303)
+    try:
+        with db.cursor() as cur:
+            if accion == "camaras":
+                ok = personas.compartir(cur, user, fid, camaras)
+                destino = "camaras"
+            elif accion == "quitar":
+                ok = personas.quitar_familiar(cur, user, fid) is not None
+                destino = "familiar_quitado"
+            else:
+                ok, destino = False, None
+    except personas.ErrorPersonas as e:
+        return _familia_response(request, user, ("error", e.mensaje), status=e.status)
+    return RedirectResponse(f"/familia?m={destino if ok else 'no_existe'}", status_code=303)
+
+
+@app.get("/invitacion/{token}", response_class=HTMLResponse)
+def invitacion_page(token: str):
+    inv = None
+    if _TOKEN_RE.fullmatch(token):
+        with db.cursor() as cur:
+            inv = personas.invitacion_valida(cur, token)
+    return HTMLResponse(pages.render_invitacion(inv, token=token), status_code=200 if inv else 404, headers=_PAGINA_PRIVADA)
+
+
+@app.post("/invitacion/{token}", response_class=HTMLResponse)
+def invitacion_aceptar(token: str, request: Request, nueva: str = Form(""), confirmacion: str = Form(""), acepta: str = Form("")):
+    """Crea la cuenta desde la invitación, abre su sesión y lo lleva a vincular Telegram."""
+    if not _TOKEN_RE.fullmatch(token):
+        return HTMLResponse(pages.render_invitacion(None), status_code=404, headers=_PAGINA_PRIVADA)
+    ip = auth.client_ip(request)
+    try:
+        with db.cursor() as cur:
+            nuevo = personas.aceptar(cur, token, nueva, confirmacion, acepta == "1", ip)
+    except personas.ErrorPersonas as e:
+        if e.codigo == "invalida":
+            return HTMLResponse(pages.render_invitacion(None), status_code=404, headers=_PAGINA_PRIVADA)
+        with db.cursor() as cur:
+            inv = personas.invitacion_valida(cur, token)
+        return HTMLResponse(pages.render_invitacion(inv, e.mensaje, token), status_code=e.status, headers=_PAGINA_PRIVADA)
+    sesion = auth.create_session(nuevo["id"], ip, request.headers.get("user-agent"), role=nuevo["role"])
+    response = RedirectResponse("/alerts?m=bienvenida", status_code=303)
+    auth.set_session_cookie(response, request, sesion, nuevo["role"])
+    return response
+
+
+# ---------------------- comunicados vecinales y «Pregúntale a tus cámaras» ----------------------
+
+COMUNICADOS_NOTICES = {"vacio": ("error", "Escribe primero la idea del comunicado.")}
+
+
+def _comunicados_response(request, user, notice=None, borrador=None, status=200):
+    with db.cursor() as cur:
+        lista = comunicados.listar(cur, user)
+        alcances = {a: comunicados.alcance(cur, user, a) for a in comunicados.AUDIENCIAS} if user["role"] == "community_admin" else None
+    return HTMLResponse(pwa.inject(pages.render_comunicados(user, lista, notice, borrador, alcances, descripciones.configurada()),
+                                   request.state.csp_nonce), status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/comunicados", response_class=HTMLResponse)
+def comunicados_page(request: Request, m: str = "", p: str = "", t: str = "", user: dict = Depends(auth.current_user)):
+    notice = COMUNICADOS_NOTICES.get(m)
+    if m == "enviado" and p.isdigit() and t.isdigit():
+        notice = ("ok", f"Comunicado enviado: le llega por Telegram a {int(t)} de {int(p)} personas, y todas lo ven aquí.")
+    return _comunicados_response(request, user, notice)
+
+
+@app.post("/comunicados/redactar", response_class=HTMLResponse)
+def comunicados_redactar(request: Request, idea: str = Form(""), user: dict = Depends(auth.require_admin)):
+    """La IA propone el comunicado; el administrador lo revisa y edita antes de enviarlo (nunca se envía solo)."""
+    try:
+        b = comunicados.redactar(idea)
+    except comunicados.ErrorComunicado as e:
+        return _comunicados_response(request, user, ("error", str(e)), {"idea": idea[:1500]}, status=422)
+    return _comunicados_response(request, user, ("ok", "Borrador listo: revísalo y edítalo antes de enviar."),
+                                 {"idea": idea[:1500], "titulo": b["titulo"], "mensaje": b["mensaje"], "ai": True})
+
+
+@app.post("/comunicados/enviar", response_class=HTMLResponse)
+def comunicados_enviar(request: Request, titulo: str = Form(""), mensaje: str = Form(""), audiencia: str = Form("todos"), ai: str = Form("0"),
+                       user: dict = Depends(auth.require_admin)):
+    try:
+        with db.cursor() as cur:
+            r = comunicados.publicar(cur, user, titulo, mensaje, audiencia, ai == "1")
+    except comunicados.ErrorComunicado as e:
+        return _comunicados_response(request, user, ("error", str(e)),
+                                     {"titulo": titulo[:120], "mensaje": mensaje[:1500], "audiencia": audiencia, "ai": ai == "1"}, status=422)
+    return RedirectResponse(f"/comunicados?m=enviado&p={r['personas']}&t={r['telegram']}", status_code=303)
+
+
+def _asistente_response(request, user, notice=None, pregunta="", respuesta=None, status=200):
+    with db.cursor() as cur:
+        limite, usadas = asistente.cupo(cur, user)
+        previas = asistente.recientes(cur, user)
+    return HTMLResponse(pwa.inject(pages.render_asistente(user, limite, usadas, previas, notice, pregunta, respuesta), request.state.csp_nonce),
+                        status_code=status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/asistente", response_class=HTMLResponse)
+def asistente_page(request: Request, user: dict = Depends(auth.current_user)):
+    return _asistente_response(request, user)
+
+
+@app.post("/asistente", response_class=HTMLResponse)
+def asistente_preguntar(request: Request, pregunta: str = Form(""), ejemplo: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Responde con datos de solo lectura y los permisos de la persona (acceso.py). No cambia nada."""
+    pregunta = (ejemplo or pregunta)[:500]
+    with db.cursor() as cur:
+        ok, texto = asistente.responder(cur, user, pregunta, "web")
+    if not ok:
+        return _asistente_response(request, user, ("alerta", texto), pregunta, status=200)
+    return _asistente_response(request, user, None, pregunta, texto)
 
 
 @app.post("/logout/todos")
@@ -515,6 +856,9 @@ def startup():
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
     alerts.set_siren(trigger_siren)
     alerts.start(polling=os.environ.get("TELEGRAM_POLLING", "1") != "0")
+    threading.Thread(target=comunicados.ciclo_forever, args=(_parar_suscripciones,), name="comunicados", daemon=True).start()
+    if descripciones.configurada():
+        threading.Thread(target=descripciones.ciclo_forever, args=(_parar_suscripciones, EVIDENCE_DIR), name="descripciones-ia", daemon=True).start()
     if os.environ.get("SUSCRIPCIONES_CICLO", "1") != "0":
         threading.Thread(target=suscripciones.ciclo_forever, args=(_parar_suscripciones,), name="suscripciones", daemon=True).start()
 
@@ -1167,17 +1511,9 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
         return JSONResponse(status_code=404, content={"error": "no encontrado"})   # nombres raros ni se buscan
     safe = name
     with db.cursor() as cur:
-        if user["role"] == "community_admin":
-            cur.execute(
-                """SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
-                   WHERE m.storage_key = %s AND m.community_id = %s
-                     AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %s)""",
-                (safe, user["community_id"], user["id"]))
-        else:
-            cur.execute(
-                """SELECT m.user_id FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
-                   WHERE m.storage_key = %s AND (m.user_id = %s OR c.user_id = %s)""",
-                (safe, user["id"], user["id"]))
+        alcance, args = acceso.posicional(acceso.evidencias(user, "m", "c"), user)     # quién ve qué: acceso.py
+        cur.execute(f"""SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
+                        WHERE m.storage_key = %s AND {alcance}""", [safe] + args)
         row = cur.fetchone()
         path = os.path.join(EVIDENCE_DIR, safe)
         if row is None or not os.path.exists(path):
@@ -1223,7 +1559,7 @@ def home(user: dict = Depends(auth.current_user)):
 
 @app.get("/cameras/{camera_id}", response_class=HTMLResponse)
 def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = "", hasta: str = "",
-                limite: str = "12", user: dict = Depends(auth.current_user)):
+                limite: str = "12", q: str = "", user: dict = Depends(auth.current_user)):
     cam = cameras.get_camera(user, camera_id)
     if cam is None:
         return _camera_not_found(user)
@@ -1231,7 +1567,8 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
     d_desde, d_hasta = _parse_date(desde), _parse_date(hasta)
     aviso = "Una fecha no es válida y se ignoró." if (desde and not d_desde) or (hasta and not d_hasta) else None
     limite = max(12, min(int(limite), 200)) if limite.isascii() and limite.isdigit() else 12
-    rows = list_events(user, limite + 1, camera_id=cam["id"], level=nivel or None, desde=d_desde, hasta=d_hasta)
+    texto = " ".join(q.split())[:80] if cam.get("premium") else ""          # buscar en las descripciones es del Plan Premium
+    rows = list_events(user, limite + 1, camera_id=cam["id"], level=nivel or None, desde=d_desde, hasta=d_hasta, texto=texto or None)
     if user["role"] == "community_admin" and cam["kind"] == "private" and cam["user_id"] != user["id"]:
         with db.cursor() as cur:        # el administrador abrió la cámara de otra persona: queda registrado
             cur.execute(
@@ -1240,7 +1577,23 @@ def camera_page(camera_id: str, request: Request, nivel: str = "", desde: str = 
                 (user["id"], user["community_id"], cam["user_id"], cam["id"], auth._clean_ip(auth.client_ip(request))))
     return HTMLResponse(pwa.inject(pages.render_camera(
         user, cam, rows[:limite], nivel, desde if d_desde else "", hasta if d_hasta else "", limite,
-        len(rows) > limite, aviso, nonce=request.state.csp_nonce, ubicacion=mapa.ficha_ubicacion(user, cam)), request.state.csp_nonce))
+        len(rows) > limite, aviso, nonce=request.state.csp_nonce, ubicacion=mapa.ficha_ubicacion(user, cam), texto=texto), request.state.csp_nonce))
+
+
+@app.post("/cameras/{camera_id}/ia")
+def camera_ia(camera_id: str, activa: str = Form(""), user: dict = Depends(auth.current_user)):
+    """Activa o desactiva la descripción con IA en una cámara: su dueño, o el administrador si es zona común. Queda en la auditoría."""
+    cam = cameras.get_camera(user, camera_id)
+    if cam is None:
+        return _camera_not_found(user)
+    puede = (cam["kind"] == "private" and cam["user_id"] == user["id"]) or (cam["kind"] == "common" and user["role"] == "community_admin")
+    if puede:
+        with db.cursor() as cur:
+            cur.execute("UPDATE cameras SET ai_enabled = %s WHERE id = %s", (activa == "1", cam["id"]))
+            cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id, meta)
+                           VALUES ('user', %s, %s, 'camera_ai_toggle', 'camera', %s, %s::jsonb)""",
+                        (str(user["id"]), user["community_id"], str(cam["id"]), json.dumps({"activa": activa == "1"})))
+    return RedirectResponse(f"/cameras/{cam['id']}", status_code=303)
 
 
 @app.post("/cameras/{camera_id}/visibilidad")
@@ -1254,6 +1607,7 @@ def camera_visibility(camera_id: str, visible: str = Form(""), user: dict = Depe
 
 ALERT_NOTICES = {
     "guardado": ("ok", "Preferencias guardadas."),
+    "bienvenida": ("ok", "¡Bienvenido a INTIVISION! Vincula tu Telegram para recibir las alertas al instante."),
     "probado": ("ok", "Te mandamos un mensaje de prueba. Revisa tu Telegram."),
     "desvinculado": ("ok", "Telegram desvinculado. Ya no recibirás alertas."),
     "espera": ("alerta", "Espera unos segundos antes de pedir otra prueba."),
@@ -1534,6 +1888,8 @@ def _plan_response(request, user, notice=None, status=200):
 
 @app.get("/plan", response_class=HTMLResponse)
 def plan_page(request: Request, m: str = "", user: dict = Depends(auth.current_user)):
+    if not acceso.tiene_plan(user):                    # vigilantes y familiares no pagan ni cambian planes
+        return RedirectResponse("/cameras", status_code=303)
     return _plan_response(request, user, notice=PLAN_NOTICES.get(m))
 
 

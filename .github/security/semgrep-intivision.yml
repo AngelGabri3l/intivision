@@ -1,0 +1,198 @@
+# Reglas Semgrep propias, derivadas de las auditorías de seguridad (run-1 y run-2).
+# ERROR bloquea el pipeline; WARNING e INFO se publican en Code Scanning para revisión.
+# Retiradas en run-2 porque la auditoría las dio por corregidas: análisis bloqueante en /analyze
+# (la ruta ya no existe) y límite de tamaño solo por Content-Length (_read_limited cuenta bytes).
+rules:
+  # ------------------------------------------------------------------ run-2: hallazgo CONFIRMADO
+  - id: intivision.secret-env-fallback-literal
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Un secreto se lee del entorno con un valor por defecto escrito en el código. Si la variable no se
+      define (docker-compose.yml no la pasa), la clave efectiva es pública y cualquiera que lea el
+      repositorio puede firmar peticiones (auditoría run-2, hallazgo confirmado:
+      backend/pasarela.py:_secreto:public-default-webhook-secret). Falla cerrado: sin variable, error 503
+      o no arrancar.
+    patterns:
+      - pattern-either:
+          - pattern: os.environ.get("$KEY") or "$DEFAULT"
+          - pattern: os.environ.get("$KEY", "$DEFAULT")
+          - pattern: os.getenv("$KEY") or "$DEFAULT"
+          - pattern: os.getenv("$KEY", "$DEFAULT")
+          - pattern: os.environ.get("$KEY", "$DEFAULT") or $X
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE).*
+      - metavariable-regex:
+          metavariable: $DEFAULT
+          regex: .+
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      audit: "run-2 confirmed: backend/pasarela.py:_secreto:public-default-webhook-secret"
+
+  # ------------------------------------------------------------------ run-2: pendientes de validar
+  - id: intivision.link-from-request-base-url
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Se construye un enlace absoluto con request.base_url. Detrás de Caddy, uvicorn sin --proxy-headers
+      ve http://, así que el enlace de recuperación de contraseña (o el back_url del pago) puede salir en
+      claro y depender de la cabecera Host (auditoría run-2). Define PUBLIC_BASE_URL obligatorio con https.
+    # Solo el objeto de la petición de Starlette/FastAPI (en el agente, self.base_url es su configuración).
+    patterns:
+      - pattern: $REQ.base_url
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: ^(request|req|websocket|ws)$
+    metadata:
+      category: security
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      audit: "run-2: backend/app.py:_base_publica:recovery-link-origin-from-request"
+
+  - id: intivision.db-connection-held-in-generator
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Un generador hace yield mientras tiene abierta una conexión o cursor de la base. Con respuestas en
+      streaming (por ejemplo el CSV), un cliente lento retiene una de las pocas conexiones del pool y
+      unos pocos pueden dejar a todas las comunidades sin base de datos (auditoría run-2). Lee los datos
+      primero o usa una conexión dedicada con tiempo límite.
+    patterns:
+      - pattern-inside: |
+          with $CTX as $C:
+              ...
+      - metavariable-regex:
+          metavariable: $CTX
+          regex: (?i).*(cursor|conn|connection|pool|checkout|db\.).*
+      # Un @contextmanager que entrega el cursor es el uso correcto (backend/db.py:cursor).
+      - pattern-not-inside: |
+          @contextlib.contextmanager
+          def $FN(...):
+              ...
+      - pattern-not-inside: |
+          @contextmanager
+          def $FN(...):
+              ...
+      - pattern: yield $V
+    metadata:
+      category: security
+      cwe: "CWE-400: Uncontrolled Resource Consumption"
+      audit: "run-2: dashboard.csv-export-holds-db-pool-connection-while-streaming"
+
+  - id: intivision.global-storage-key-first-claimant
+    languages: [python]
+    severity: WARNING
+    message: >-
+      INSERT de media_files con `ON CONFLICT (storage_key) DO NOTHING`. Si el nombre del archivo puede
+      venir del cliente (/ingest en JSON acepta "image"), el primero que registra un nombre se queda con
+      él y /evidence le entrega lo que haya en disco con ese nombre (auditoría run-1 pistas 2-3, sigue en
+      run-2). No aceptes nombres de archivo enviados por la mini PC; usa solo nombres generados (UUID).
+    pattern-regex: (?i)ON\s+CONFLICT\s*\(\s*storage_key\s*\)\s*DO\s+NOTHING
+    paths:
+      include: ["*.py"]
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      audit: "run-2: backend/app.py:ingest:client-image-name-claims-storage-key"
+
+  # ------------------------------------------------------------------ generales (siguen vigentes)
+  - id: intivision.sleep-in-async
+    languages: [python]
+    severity: ERROR
+    message: >-
+      time.sleep() dentro de una función async bloquea el event loop. Usa `await asyncio.sleep(...)`.
+    patterns:
+      # Semgrep no empareja "async def" con decorador (@app.post) sin la segunda forma.
+      - pattern-either:
+          - pattern-inside: |
+              async def $F(...):
+                  ...
+          - pattern-inside: |
+              @$DECORATOR(...)
+              async def $F(...):
+                  ...
+      - pattern: time.sleep(...)
+    metadata:
+      category: security
+      cwe: "CWE-400: Uncontrolled Resource Consumption"
+
+  - id: intivision.x-forwarded-for-trust
+    languages: [python]
+    severity: INFO
+    message: >-
+      Se usa X-Forwarded-For como IP del cliente. Hoy está mitigado (el backend solo escucha en
+      127.0.0.1 detrás de Caddy, auditoría run-2), pero confía en esa cabecera solo si la conexión viene
+      de la IP exacta del proxy, no de cualquier red privada.
+    pattern-either:
+      - pattern: $REQ.headers.get("x-forwarded-for", ...)
+      - pattern: $REQ.headers.get("X-Forwarded-For", ...)
+      - pattern: $REQ.headers["x-forwarded-for"]
+    metadata:
+      category: security
+      cwe: "CWE-348: Use of Less Trusted Source"
+
+  - id: intivision.fileresponse-from-joined-path
+    languages: [python]
+    severity: INFO
+    message: >-
+      FileResponse sobre una ruta variable. Verifica que el archivo pertenezca al usuario (no solo que
+      exista una fila con ese nombre), que no haya caducado (expires_at) y que la ruta no salga del
+      directorio (auditoría run-2, retención y borrado).
+    patterns:
+      - pattern: FileResponse($PATH, ...)
+      - pattern-not: FileResponse("...", ...)
+    metadata:
+      category: security
+      cwe: "CWE-22: Path Traversal"
+
+  - id: intivision.requests-exception-logged
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Se registra la excepción de `requests` tal cual. Si la URL lleva un token (por ejemplo
+      /bot<TOKEN>/ de Telegram), el token termina en los logs. Limpia el mensaje antes de registrarlo
+      (backend/telegram_api.py ya lo hace con clean()).
+    patterns:
+      - pattern-inside: |
+          try:
+              ...
+              requests.$M(...)
+              ...
+          except $EXC as $E:
+              ...
+      - pattern-either:
+          - pattern: $LOG.$LVL(..., $E, ...)
+          - pattern: $LOG.$LVL(f"...{$E}...", ...)
+      - metavariable-regex:
+          metavariable: $LVL
+          regex: ^(debug|info|warning|error|exception|critical)$
+    metadata:
+      category: security
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # Componente MQTT fuera de alcance (no desarrollado, ver .github/security/alcance.yml):
+  # se sigue reportando como INFO para que no se pierda cuando se desarrolle.
+  - id: intivision.mqtt-without-tls
+    languages: [python]
+    severity: INFO
+    message: >-
+      [Fuera de alcance: módulo MQTT no desarrollado] Cliente MQTT que se conecta sin llamar antes a
+      tls_set(): las órdenes de la sirena y las credenciales viajarían sin cifrar (auditoría, pista 1).
+      Revisar antes de conectar un dispositivo físico o desplegar un broker.
+    patterns:
+      - pattern-inside: |
+          def $F(...):
+              ...
+              $C = mqtt.Client(...)
+              ...
+      - pattern-not-inside: |
+          def $F(...):
+              ...
+              $C.tls_set(...)
+              ...
+      - pattern: $C.connect(...)
+    metadata:
+      category: security
+      scope: fuera-de-alcance (mqtt, no-desarrollado)
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"

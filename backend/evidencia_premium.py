@@ -10,12 +10,11 @@ import json
 import os
 import zipfile
 
-from backend import planes
+from backend import acceso, planes
 
-_VISIBLE = {
-    "community_admin": "e.community_id = %(com)s AND (c.id IS NULL OR c.admin_can_view OR c.user_id = %(uid)s)",
-    "resident": "(e.user_id = %(uid)s OR c.user_id = %(uid)s)",
-}
+def _alcance(user):
+    """(SQL, parámetros) de los eventos que esta persona puede ver, con marcadores %(acc_uid)s y %(acc_com)s (ver acceso.py)."""
+    return acceso.nombrado(acceso.eventos(user, "e", "c"), user)
 
 
 def _sha256_archivo(ruta) -> str:
@@ -28,16 +27,16 @@ def _sha256_archivo(ruta) -> str:
 
 def evento_visible(cur, user, event_id):
     """El evento con su cámara, si este usuario puede verlo; si no, None (no se distingue de «no existe»)."""
-    cond = _VISIBLE.get(user["role"], _VISIBLE["resident"])
+    cond, extra = _alcance(user)
     cur.execute(f"""SELECT e.id, e.level, e.score, e.people_count, e.status, e.camera_id::text AS camera_id,
                            to_char(e.occurred_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD HH24:MI:SS') AS hora_lima,
                            to_char(e.reviewed_at AT TIME ZONE 'America/Lima', 'YYYY-MM-DD HH24:MI:SS') AS revisado_lima,
-                           r.full_name AS revisado_por, c.name AS camara, c.place AS lugar, c.user_id::text AS dueno,
+                           e.ai_description, e.ai_sees_people, r.full_name AS revisado_por, c.name AS camara, c.place AS lugar, c.user_id::text AS dueno,
                            co.name AS comunidad, e.community_id::text AS community_id
                     FROM events e LEFT JOIN cameras c ON c.id = e.camera_id LEFT JOIN users r ON r.id = e.reviewed_by
                     JOIN communities co ON co.id = e.community_id
                     WHERE e.id = %(ev)s AND {cond}""",
-                {"ev": int(event_id), "com": user["community_id"], "uid": user["id"]})
+                dict(extra, ev=int(event_id)))
     return cur.fetchone()
 
 
@@ -71,6 +70,8 @@ def zip_evidencia(cur, user, event_id, evidence_dir, ip=None):
     ficha = {"evento": ev["id"], "fecha_hora_lima": ev["hora_lima"], "comunidad": ev["comunidad"], "camara": ev["camara"],
              "lugar": ev["lugar"], "nivel": ev["level"], "puntaje": ev["score"], "personas": ev["people_count"], "senales": senales,
              "revision": {"estado": ev["status"], "por": ev["revisado_por"], "fecha_hora_lima": ev["revisado_lima"]},
+             "descripcion_automatica": ({"texto": ev["ai_description"], "ve_personas": ev["ai_sees_people"],
+                                         "nota": "Generada por IA; puede equivocarse."} if ev["ai_description"] else None),
              "archivos": {n: h for n, _, h in archivos},
              "generado_lima": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-5))).strftime("%Y-%m-%d %H:%M:%S"),
              "nota": "Generado por INTIVISION. Las huellas SHA-256 permiten comprobar que los archivos no se modificaron."}
@@ -118,8 +119,7 @@ def destinatarios_semanales(cur):
 
 def resumen_semanal(cur, user):
     """El texto del resumen de los últimos 7 días que esta persona puede ver."""
-    cond = _VISIBLE.get(user["role"], _VISIBLE["resident"])
-    p = {"com": user["community_id"], "uid": user["id"]}
+    cond, p = _alcance(user)
     cur.execute(f"""SELECT count(*) AS total,
                            count(*) FILTER (WHERE e.level = 'ALTO') AS altos,
                            count(*) FILTER (WHERE e.level = 'MEDIO') AS medios,

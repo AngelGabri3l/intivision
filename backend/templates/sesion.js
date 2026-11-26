@@ -24,3 +24,13 @@
 
   EVENTOS.forEach(function (nombre) { document.addEventListener(nombre, avisar, { capture: true, passive: true }); });
 })();
+
+// Menú de usuario de la cabecera (el elemento details con la clase menu-usuario): se cierra con Esc o al tocar fuera. Sin ese menú en la página, no hace nada.
+(function () {
+  var menu = document.getElementsByClassName("menu-usuario")[0];
+  if (!menu) { return; }
+  document.addEventListener("click", function (e) { if (menu.open && !menu.contains(e.target)) { menu.open = false; } });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && menu.open) { menu.open = false; var boton = menu.querySelector("summary"); if (boton) { boton.focus(); } }
+  });
+})();

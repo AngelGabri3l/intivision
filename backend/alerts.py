@@ -195,7 +195,24 @@ _REPLIES = {
     "taken": "Este chat ya está vinculado a otra cuenta de INTIVISION.",
     "invalid": "Ese enlace no es válido o ya venció. Genera uno nuevo en INTIVISION, en Alertas.",
 }
-_HELP = "Este bot solo envía alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram."
+_HELP = ("Este bot envía las alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram.\n"
+         "Con el Plan Premium puedes preguntar por tus cámaras: /pregunta ¿pasó algo anoche?")
+
+
+def _responder_pregunta(chat_id, pregunta):
+    """«Pregúntale a tus cámaras» por Telegram: solo para chats vinculados, con los permisos y el tope de esa persona."""
+    from backend import asistente
+    try:
+        with db.cursor() as cur:
+            user = asistente.usuario_de_chat(cur, chat_id)
+            if user is None:
+                _reply(chat_id, _HELP)
+                return
+            ok, texto = asistente.responder(cur, user, pregunta, "telegram")
+        _reply(chat_id, ("🤖 " if ok else "") + texto)
+    except Exception:                                      # noqa: BLE001
+        log.exception("Fallo al responder una pregunta por Telegram")
+        _reply(chat_id, "No pude responder ahora. Intenta en un momento.")
 
 
 def handle_update(update):
@@ -210,6 +227,14 @@ def handle_update(update):
         _reply(chat["id"], "INTIVISION solo se vincula desde un chat privado con el bot.")
         return
     texto = (msg.get("text") or "").strip()
+    comando = texto.split(maxsplit=1)[0] if texto else ""
+    if comando == "/pregunta" or comando.startswith("/pregunta@"):      # en grupos Telegram agrega @nombre_del_bot
+        partes = texto.split(maxsplit=1)
+        if len(partes) == 1:
+            _reply(chat["id"], "Escribe tu pregunta después del comando, por ejemplo: /pregunta ¿pasó algo anoche?")
+        else:
+            threading.Thread(target=_responder_pregunta, args=(chat["id"], partes[1]), daemon=True).start()
+        return
     if texto.split(maxsplit=1)[:1] == ["/start"]:
         partes = texto.split(maxsplit=1)
         if len(partes) == 1:
@@ -269,6 +294,9 @@ _ENQUEUE_HEAD = """
 """
 _TO_OWNER = " AND ch.user_id = %(owner)s::uuid "
 _TO_ADMINS = " AND u.community_id = %(community)s::uuid AND u.role = 'community_admin' "
+_TO_GUARDS = " AND u.community_id = %(community)s::uuid AND u.role = 'guard' "
+_TO_FAMILY = (" AND u.role = 'family' AND u.sponsor_id = %(owner)s::uuid"
+              " AND EXISTS (SELECT 1 FROM camera_shares sh WHERE sh.user_id = u.id AND sh.camera_id = %(camera)s::uuid) ")
 _ENQUEUE_TAIL = """
       AND NOT EXISTS (
             SELECT 1 FROM alert_deliveries d2 JOIN events e2 ON e2.id = d2.event_id
@@ -311,7 +339,14 @@ def enqueue(cur, event_id, community_id, camera_id, user_id, level):
               "cooldown": COOLDOWN[level], "owner": owner, "community": str(community_id), "audience": audience}
     sql = _ENQUEUE_HEAD + (_TO_ADMINS if a_admins else _TO_OWNER) + _ENQUEUE_TAIL
     cur.execute(sql, params)
-    return cur.rowcount
+    total = cur.rowcount
+    if comun and audience == "normal":                  # los vigilantes reciben las alertas de las zonas comunes
+        cur.execute(_ENQUEUE_HEAD + _TO_GUARDS + _ENQUEUE_TAIL, params)
+        total += cur.rowcount
+    if owner and camera_id:                             # los familiares, las de las cámaras que su vecino les compartió
+        cur.execute(_ENQUEUE_HEAD + _TO_FAMILY + _ENQUEUE_TAIL, params)
+        total += cur.rowcount
+    return total
 
 
 # ------------------------------------------------------------------ envío

@@ -1,0 +1,46 @@
+# Configuración de gitleaks: reglas por defecto + reglas propias del proyecto.
+# Origen: run-1 y run-2 (hallazgo confirmado) encontraron un hash bcrypt de basic_auth de Caddy en el
+# historial, y run-2 un secreto de webhook escrito en el código; las reglas por defecto no los detectan.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "bcrypt-hash"
+description = "Hash bcrypt versionado (por ejemplo basic_auth de Caddy o seeds de usuarios)"
+regex = '''\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}'''
+tags = ["hash", "bcrypt"]
+
+[[rules]]
+id = "webhook-signing-secret"
+description = "Secreto de firma de webhook estilo Stripe (whsec_…); run-2 encontró uno como valor por defecto en backend/pasarela.py"
+regex = '''\bwhsec_[A-Za-z0-9_]{16,}\b'''
+tags = ["webhook", "secret"]
+
+[[rules]]
+id = "mercadopago-access-token"
+description = "Access token de Mercado Pago (producción o prueba)"
+regex = '''\b(?:APP_USR|TEST)-\d{10,}-\d{6}-[a-f0-9]{32}-\d{6,}\b'''
+tags = ["payments", "mercadopago"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "API key de Anthropic (backend/descripciones.py la lee de ANTHROPIC_API_KEY)"
+regex = '''\bsk-ant-[A-Za-z0-9_-]{20,}\b'''
+tags = ["api-key"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Token de bot de Telegram"
+regex = '''\b\d{8,10}:[A-Za-z0-9_-]{35}\b'''
+tags = ["token", "telegram"]
+
+[[rules]]
+id = "postgres-url-with-password"
+description = "URL de PostgreSQL con contraseña real"
+regex = '''postgres(?:ql)?://[^:\s/]+:([^@\s/]{6,})@'''
+secretGroup = 1
+tags = ["database"]
+  [rules.allowlist]
+  description = "Marcadores de ejemplo usados en la documentación del código"
+  regexes = ['''(?i)^(clave|password|contrase(ñ|n)a|changeme|example|xxx+)$''']

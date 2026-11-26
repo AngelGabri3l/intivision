@@ -37,7 +37,8 @@ def read_template(name) -> str:
 
 
 def role_text(user) -> str:
-    return "Administrador" if user["role"] == "community_admin" else "Residente"
+    from backend import acceso
+    return acceso.nombre_rol(user)
 
 
 def pending_link(user, active=None) -> str:
@@ -82,7 +83,40 @@ def mapa_link(user, active=None) -> str:
 
 def admin_links(user, active=None) -> str:
     """Los enlaces que solo ve un administrador: Panel, Mapa, Pendientes (con su número) y Equipos."""
-    return panel_link(user, active) + mapa_link(user, active) + pending_link(user, active) + equipos_link(user, active)
+    return (panel_link(user, active) + mapa_link(user, active) + pending_link(user, active) + equipos_link(user, active)
+            + personas_link(user, active))
+
+
+def personas_link(user, active=None) -> str:
+    if user.get("role") != "community_admin":
+        return ""
+    actual = ' aria-current="page"' if active == "personas" else ""
+    return f'<a class="pestana" href="/admin/personas"{actual}>Personas</a>'
+
+
+def menu_usuario(user, active) -> str:
+    """
+    El nombre de la persona abre un menú con lo de su cuenta: Mi plan (donde se paga, se baja de plan o se cancela), la seguridad de
+    su cuenta y Cerrar sesión. Es un <details>: funciona sin JavaScript; un script pequeño lo cierra con Esc o al tocar fuera.
+    """
+    def enlace(href, texto, clave=None):
+        actual = ' aria-current="page"' if clave and clave == active else ""
+        return f'<a href="{href}"{actual}>{texto}</a>'
+    nombre = (user["full_name"] or "").strip() or "Mi cuenta"
+    return ('<details class="menu-usuario"><summary class="menu-usuario__boton">'
+            f'<span class="menu-usuario__avatar" aria-hidden="true">{esc(nombre[:1].upper())}</span>'
+            f'<span class="menu-usuario__texto"><span class="menu-usuario__nombre">{esc(nombre)}</span>'
+            f'<span class="menu-usuario__rol">{role_text(user)}</span></span>'
+            '<span class="menu-usuario__flecha" aria-hidden="true">▾</span><span class="solo-lectores">Menú de tu cuenta</span></summary>'
+            '<div class="menu-usuario__panel">'
+            f'<div class="menu-usuario__cabecera"><strong>{esc(nombre)}</strong><span>{role_text(user)}</span></div>'
+            + (enlace("/plan", "Mi plan", "plan") + enlace("/familia", "Mi familia", "familia")
+               if user.get("role") in ("resident", "community_admin") else "")
+            + enlace("/asistente", "Pregúntale a tus cámaras", "asistente") + enlace("/comunicados", "Comunicados", "comunicados")
+            + enlace("/cuenta/contrasena", "Cambiar contraseña", "cuenta")
+            + enlace("/alerts#titulo-seguridad", "Seguridad de tu cuenta")
+            + '<form method="post" action="/logout"><button class="menu-usuario__salir" type="submit">Cerrar sesión</button></form>'
+            '</div></details>')
 
 
 def nav(user, active) -> str:
@@ -95,10 +129,9 @@ def nav(user, active) -> str:
         return f'<a class="pestana" href="{href}"{actual}>{texto}</a>'
     return ('<div class="contenedor cabecera__fila"><div class="marca">'
             '<span class="marca__nombre pixel">INTIVISION</span><span class="marca__modulo">Guardian</span></div>'
-            f'<div class="cabecera__usuario"><span class="usuario">{esc(user["full_name"])} · {role_text(user)}</span>'
-            '<form method="post" action="/logout"><button class="salir" type="submit">Cerrar sesión</button></form></div></div>'
+            f'<div class="cabecera__usuario">{menu_usuario(user, active)}</div></div>'
             '<nav aria-label="Principal" class="cabecera__pestanas"><div class="contenedor cabecera__tabs">'
-            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas") + pestana("/plan", "Mi plan", "plan")
+            + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas")
             + admin_links(user, active)
             + '</div></nav>')
 
@@ -147,7 +180,17 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}{video_block(r)}{zip_link(r)}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{ia_block(r)}{video_block(r)}{zip_link(r)}</div></div>')
+
+
+def ia_block(r) -> str:
+    """La descripción automática del evento, rotulada como tal (puede equivocarse)."""
+    if not r.get("ai_description"):
+        return ""
+    aviso = ('<span class="evento__ia-aviso">La IA no ve personas: podría ser una falsa alarma.</span>'
+             if r.get("ai_sees_people") is False else "")
+    return (f'<p class="evento__ia"><span class="evento__ia-rotulo">Descripción automática · puede equivocarse</span>'
+            f'{esc(r["ai_description"])}{aviso}</p>')
 
 
 def zip_link(r) -> str:
@@ -250,8 +293,8 @@ def render_cameras(user, cams, message=None) -> str:
         bloques=bloques)
 
 
-def filter_link(cam_id, nivel, desde, hasta, limite) -> str:
-    params = {k: v for k, v in (("nivel", nivel), ("desde", desde), ("hasta", hasta)) if v}
+def filter_link(cam_id, nivel, desde, hasta, limite, texto="") -> str:
+    params = {k: v for k, v in (("nivel", nivel), ("desde", desde), ("hasta", hasta), ("q", texto)) if v}
     params["limite"] = limite
     return f"/cameras/{cam_id}?{urlencode(params)}"
 
@@ -264,10 +307,23 @@ def live_block(cam, nonce) -> str:
                 script=fill(read_template("vivo.js"), camera_id=esc(cam["id"])))
 
 
-def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="", ubicacion=None) -> str:
+def ia_control(user, cam) -> str:
+    """Quién decide si las fotos de esta cámara se describen con IA: su dueño, o el administrador si es zona común."""
+    puede = (cam["kind"] == "private" and cam["user_id"] == user["id"]) or (cam["kind"] == "common" and user["role"] == "community_admin")
+    if not puede:
+        return ""
+    activa = cam.get("ai_enabled", True)
+    return (f'<form class="visibilidad" method="post" action="/cameras/{esc(cam["id"])}/ia">'
+            f'<p class="visibilidad__texto">Descripción automática con IA de las fotos de los eventos: <strong>{"activada" if activa else "desactivada"}</strong>. '
+            'Antes de enviarse, a la foto se le desenfocan los rostros.</p>'
+            f'<input type="hidden" name="activa" value="{0 if activa else 1}">'
+            f'<button class="btn btn--texto" type="submit">{"Desactivar en esta cámara" if activa else "Activar en esta cámara"}</button></form>')
+
+
+def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, message=None, nonce="", ubicacion=None, texto="") -> str:
     es_dueno = cam["user_id"] == user["id"]
     admin = user["role"] == "community_admin"
-    filtrando = bool(nivel or desde or hasta)
+    filtrando = bool(nivel or desde or hasta or texto)
 
     resumen = "".join(
         f'<div class="resumen__dato"><span class="resumen__valor pixel">{valor}</span>'
@@ -293,6 +349,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                        'Este acceso queda registrado.</p>')
     else:
         visibilidad = ""
+    visibilidad += ia_control(user, cam)
 
     opciones = "".join(f'<option value="{n}"{" selected" if n == nivel else ""}>{n.capitalize()}</option>'
                        for n in cameras.LEVELS)
@@ -303,7 +360,10 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                f'<input class="campo__entrada" id="f-desde" name="desde" type="date" value="{esc(desde)}"></div>'
                f'<div class="campo"><label class="campo__etiqueta" for="f-hasta">Hasta</label>'
                f'<input class="campo__entrada" id="f-hasta" name="hasta" type="date" value="{esc(hasta)}"></div>'
-               f'<div class="filtros__acciones"><button class="btn" type="submit">Filtrar</button>'
+               + (f'<div class="campo"><label class="campo__etiqueta" for="f-q">Buscar en las descripciones</label>'
+                  f'<input class="campo__entrada" id="f-q" name="q" type="search" maxlength="80" value="{esc(texto)}" '
+                  'placeholder="mochila roja, moto…"></div>' if cam.get("premium") else "")
+               + f'<div class="filtros__acciones"><button class="btn" type="submit">Filtrar</button>'
                + (f'<a class="btn btn--texto" href="/cameras/{esc(cam["id"])}">Quitar filtros</a>' if filtrando else "")
                + '</div></form>')
 
@@ -318,7 +378,7 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                  + '</p></div>')
     mas = ""
     if has_more:
-        mas = (f'<div class="mas"><a class="btn" href="{esc(filter_link(cam["id"], nivel, desde, hasta, limite + 12))}">'
+        mas = (f'<div class="mas"><a class="btn" href="{esc(filter_link(cam["id"], nivel, desde, hasta, limite + 12, texto))}">'
                f'Ver más eventos</a></div>')
 
     return fill(
@@ -669,3 +729,307 @@ def render_mp_ir(s, url) -> str:
     pagina = pagina.replace("Modo de prueba · pasarela de pagos simulada · no se cobra dinero real",
                             "Pago seguro con Mercado Pago · si usas credenciales de prueba no se cobra dinero real")
     return pagina.replace("</head>", f'<meta http-equiv="refresh" content="2;url={esc(url)}">\n</head>', 1)
+
+
+
+# ------------------------------------------------------------------ contraseña: cambiar y recuperar
+
+def _campo_clave(id_, etiqueta, auto, minimo=False) -> str:
+    return (f'<div class="campo"><label class="campo__etiqueta" for="{id_}">{etiqueta}</label>'
+            f'<input class="campo__entrada" id="{id_}" name="{id_}" type="password" autocomplete="{auto}" maxlength="1024"'
+            + (f' minlength="{auth.MIN_PASSWORD_CHARS}"' if minimo else "") + ' required></div>')
+
+
+def _reglas_clave() -> str:
+    return (f'<p class="analisis__descripcion">Mínimo {auth.MIN_PASSWORD_CHARS} caracteres, sin tu nombre, tu correo ni tu teléfono, '
+            'y que no sea de las más comunes.</p>')
+
+
+def render_cuenta_contrasena(user, notice=None) -> str:
+    formulario = ('<form method="post" action="/cuenta/contrasena" autocomplete="off" class="formulario">'
+                  + _campo_clave("actual", "Contraseña actual", "current-password")
+                  + _campo_clave("nueva", "Contraseña nueva", "new-password", minimo=True)
+                  + _campo_clave("confirmacion", "Repite la contraseña nueva", "new-password", minimo=True)
+                  + _reglas_clave() + '<div><button class="btn" type="submit">Cambiar contraseña</button></div></form>')
+    return fill(read_template("cuenta.html"), nav=nav(user, "cuenta"),
+                descripcion="Al cambiarla cerramos tus sesiones en los demás dispositivos; esta sigue abierta y te avisamos por Telegram.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", formulario=formulario)
+
+
+def _estado_login(mensaje, tipo="error") -> str:
+    etiqueta = {"alerta": "Aviso", "ok": "Listo"}.get(tipo, "Error")
+    return (f'<p class="estado" data-tipo="{tipo}" role="alert"><span class="estado__tag">{etiqueta}</span><span>{esc(mensaje)}</span></p>')
+
+
+def render_recuperar(modo, error=None, token="", identifier="") -> str:
+    """modo: 'pedir' (formulario), 'enviado' (respuesta única), 'nueva' (elegir contraseña con el enlace) o 'invalido'."""
+    def cabecera(titulo, texto):
+        return (f'<div class="analisis__texto"><h1 class="analisis__titulo pixel" id="titulo-acceso">{titulo}</h1>'
+                f'<p class="analisis__descripcion">{texto}</p></div>')
+    volver = '<p class="analisis__descripcion acceso__nota"><a href="/login" style="color:inherit;text-decoration:underline;text-underline-offset:4px">Volver a iniciar sesión</a></p>'
+    if modo == "enviado":
+        cuerpo = (cabecera("Revisa tu Telegram", "Si esa cuenta existe y tiene Telegram vinculado, te enviamos un enlace para cambiar la contraseña. "
+                           f"Vale {cuenta_minutos()} minutos y solo se puede usar una vez.")
+                  + '<div class="formulario">' + _estado_login("Si no te llega nada, tu cuenta no tiene Telegram vinculado: pídele al administrador de tu comunidad "
+                                                               "que te genere un enlace.", "alerta") + volver + "</div>")
+    elif modo == "nueva":
+        cuerpo = (cabecera("Elige tu contraseña nueva", "Al guardarla cerramos tus sesiones en todos los dispositivos.")
+                  + f'<form class="formulario" method="post" action="/recuperar/{esc(token)}" autocomplete="off">'
+                  + _campo_clave("nueva", "Contraseña nueva", "new-password", minimo=True)
+                  + _campo_clave("confirmacion", "Repite la contraseña nueva", "new-password", minimo=True)
+                  + (_estado_login(error) if error else "") + _reglas_clave()
+                  + '<div><button class="btn" type="submit">Guardar contraseña</button></div></form>')
+    elif modo == "invalido":
+        cuerpo = (cabecera("Este enlace ya no sirve", "Pudo vencer (dura unos minutos) o ya se usó.")
+                  + '<div class="formulario"><div><a class="btn" href="/recuperar" style="text-decoration:none;display:inline-block">Pedir un enlace nuevo</a></div></div>')
+    else:
+        cuerpo = (cabecera("Recupera tu contraseña", "Escribe el correo o el teléfono de tu cuenta. Si tienes Telegram vinculado, te mandamos un enlace.")
+                  + '<form class="formulario" method="post" action="/recuperar" autocomplete="on"><div class="campo">'
+                  '<label class="campo__etiqueta" for="identifier">Correo o teléfono</label>'
+                  '<input class="campo__entrada" id="identifier" name="identifier" type="text" inputmode="email" autocomplete="username" '
+                  f'autocapitalize="none" spellcheck="false" maxlength="254" value="{esc(identifier)}" required autofocus></div>'
+                  + (_estado_login(error, "alerta") if error else "")
+                  + '<div><button class="btn" type="submit">Enviarme el enlace</button></div>' + volver + "</form>")
+    return fill(read_template("recuperar.html"), contenido='<div class="contenedor analisis">' + cuerpo + "</div>")
+
+
+def cuenta_minutos() -> int:
+    from backend import cuenta
+    return cuenta.TOKEN_MINUTOS
+
+
+# ------------------------------------------------------------------ personas, familia e invitaciones
+
+def enmascarar(email=None, phone=None) -> str:
+    """El contacto a medias: suficiente para reconocerlo, sin exponerlo entero en pantalla."""
+    partes = []
+    if email:
+        nombre, _, dominio = email.partition("@")
+        partes.append(f"{nombre[:2]}{'•' * max(1, min(6, len(nombre) - 2))}@{dominio}")
+    if phone:
+        partes.append(f"{phone[:4]}{'•' * max(1, len(phone) - 7)}{phone[-3:]}" if len(phone) > 7 else "•••")
+    return " · ".join(partes)
+
+
+def _bloque_enlace(enlace) -> str:
+    """El enlace recién creado (invitación o contraseña): se muestra UNA vez, con copiar y enviar por WhatsApp."""
+    if not enlace:
+        return ""
+    from urllib.parse import quote
+    texto = f"{enlace['mensaje']} {enlace['url']}"
+    digitos = "".join(ch for ch in (enlace.get("telefono") or "") if ch.isdigit())
+    destino = f"https://wa.me/{digitos}" if digitos else "https://wa.me/"
+    return (f'<div class="enlace-nuevo" role="status"><strong>{esc(enlace["titulo"])}</strong>'
+            f'<label for="enlace-copiar" class="analisis__descripcion">Cópialo ahora: por seguridad no se vuelve a mostrar. {esc(enlace["vigencia"])}</label>'
+            f'<input id="enlace-copiar" type="text" readonly value="{esc(enlace["url"])}">'
+            f'<a class="btn" href="{esc(destino)}?text={esc(quote(texto))}" target="_blank" rel="noopener noreferrer">Enviar por WhatsApp</a></div>')
+
+
+def _fecha_corta(valor) -> str:
+    return suscripciones_fecha(valor) if valor else "nunca"
+
+
+ROLES_TEXTO = {"resident": "Vecino", "community_admin": "Administrador", "guard": "Vigilante", "family": "Familiar"}
+
+
+def _acciones_persona(p, yo) -> str:
+    if p["id"] == str(yo["id"]):
+        return '<span class="analisis__descripcion">(tú)</span>'
+    base = f'/admin/personas/{esc(p["id"])}'
+    activa = p["status"] == "active"
+    partes = [f'<form method="post" action="{base}/{"suspender" if activa else "reactivar"}"><button class="btn btn--texto" type="submit">'
+              f'{"Suspender" if activa else "Reactivar"}</button></form>']
+    if p["role"] != "family":
+        opciones = "".join(f'<option value="{r}"{" selected" if r == p["role"] else ""}>{ROLES_TEXTO[r]}</option>'
+                           for r in ("resident", "community_admin", "guard"))
+        partes.append(f'<form method="post" action="{base}/rol"><label class="solo-lectores" for="rol-{esc(p["id"])}">Rol</label>'
+                      f'<select id="rol-{esc(p["id"])}" name="rol">{opciones}</select><button class="btn btn--texto" type="submit">Cambiar rol</button></form>')
+    if activa:
+        partes.append(f'<form method="post" action="{base}/enlace"><button class="btn btn--texto" type="submit">Enlace para cambiar su contraseña</button></form>')
+    partes.append(f'<form method="post" action="{base}/sesiones"><button class="btn btn--texto" type="submit">Cerrar sus sesiones</button></form>')
+    partes.append(f'<form method="post" action="{base}/baja"><label for="baja-{esc(p["id"])}">Escribe BAJA para darla de baja</label>'
+                  f'<input type="text" id="baja-{esc(p["id"])}" name="confirmacion" autocomplete="off" required>'
+                  '<button class="btn btn--peligro" type="submit">Dar de baja</button></form>')
+    return f'<details class="acciones-persona"><summary>Acciones</summary>{"".join(partes)}</details>'
+
+
+def render_personas(user, personas, pendientes, notice=None, enlace=None) -> str:
+    invitar = ('<form method="post" action="/admin/personas/invitar" class="form-linea" style="margin-top:24px">'
+               '<label>Nombre<input name="nombre" maxlength="120" required></label>'
+               '<label>Correo<input name="email" type="email" maxlength="254" autocomplete="off"></label>'
+               '<label>Teléfono<input name="phone" inputmode="tel" maxlength="20" autocomplete="off"></label>'
+               '<label>Rol<select name="rol"><option value="resident">Vecino</option><option value="guard">Vigilante</option>'
+               '<option value="community_admin">Administrador</option></select></label>'
+               '<div><button class="btn" type="submit">Crear invitación</button></div></form>'
+               '<p class="analisis__descripcion">El correo o el teléfono será su usuario. Los familiares los invita cada vecino desde «Mi familia».</p>')
+    filas = []
+    for p in personas:
+        nombre = esc(p["full_name"]) + (f'<br><span class="analisis__descripcion">familiar de {esc(p["vecino"])}</span>' if p.get("vecino") else "")
+        estado = "Activa" if p["status"] == "active" else '<span class="estado-suspendida">Suspendida</span>'
+        filas.append(f'<tr><td>{nombre}<br><span class="analisis__descripcion">{esc(enmascarar(p["email"], p["phone"]))}</span></td>'
+                     f'<td><span class="chip-rol">{ROLES_TEXTO.get(p["role"], p["role"])}</span>{" · Premium" if p["premium"] else ""}</td>'
+                     f'<td>{estado}</td><td>{_fecha_corta(p["last_login_at"])}</td><td>{p["camaras"]}</td><td>{p["familiares"]}</td>'
+                     f'<td>{"Sí" if p["telegram"] else "—"}</td><td>{_acciones_persona(p, user)}</td></tr>')
+    tabla = ('<div class="tabla-personas__envoltura"><table class="tabla-personas"><thead><tr><th>Persona</th><th>Rol</th><th>Estado</th>'
+             '<th>Último ingreso</th><th>Cámaras</th><th>Familiares</th><th>Telegram</th><th></th></tr></thead><tbody>'
+             + "".join(filas) + "</tbody></table></div>")
+    secciones = _seccion("personas-lista", "En tu comunidad", tabla) + _seccion("personas-pendientes", "Invitaciones pendientes",
+                                                                                _tabla_pendientes(pendientes, "/admin/personas/invitaciones"))
+    return fill(read_template("personas.html"), nav=nav(user, "personas"),
+                descripcion="Invita a vecinos, administradores y vigilantes. Cada acción queda registrada.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace=_bloque_enlace(enlace), invitar=invitar, secciones=secciones)
+
+
+def _seccion(id_, titulo, contenido) -> str:
+    return (f'<section class="seccion" aria-labelledby="{id_}"><div class="contenedor"><div class="historial__cabecera">'
+            f'<h2 class="historial__titulo" id="{id_}"><span class="pixel">{titulo}</span></h2></div>{contenido}</div></section>')
+
+
+def _tabla_pendientes(pendientes, base) -> str:
+    if not pendientes:
+        return '<p class="analisis__descripcion">No hay invitaciones pendientes.</p>'
+    filas = []
+    for i in pendientes:
+        vence = "vencida" if i["vencida"] else f"vence el {suscripciones_fecha(i['expires_at'])}"
+        filas.append(f'<tr><td>{esc(i["full_name"])}<br><span class="analisis__descripcion">{esc(enmascarar(i["email"], i["phone"]))}</span></td>'
+                     f'<td><span class="chip-rol">{ROLES_TEXTO.get(i["role"], i["role"])}</span></td><td>{vence}</td><td>'
+                     f'<form method="post" action="{base}/{esc(i["id"])}/reenviar" style="display:inline"><button class="btn btn--texto" type="submit">Nuevo enlace</button></form> '
+                     f'<form method="post" action="{base}/{esc(i["id"])}/revocar" style="display:inline"><button class="btn btn--texto" type="submit">Revocar</button></form></td></tr>')
+    return ('<div class="tabla-personas__envoltura"><table class="tabla-personas"><thead><tr><th>Persona</th><th>Rol</th><th>Vigencia</th><th></th>'
+            '</tr></thead><tbody>' + "".join(filas) + "</tbody></table></div>")
+
+
+def _casillas_camaras(camaras, elegidas=(), prefijo="cam") -> str:
+    if not camaras:
+        return '<p class="analisis__descripcion">Aún no tienes cámaras privadas: tu familiar no vería nada hasta que tengas una.</p>'
+    return '<div class="casillas">' + "".join(
+        f'<label><input type="checkbox" name="camaras" value="{esc(c["id"])}"{" checked" if c["id"] in elegidas else ""}> {esc(c["name"])}</label>'
+        for c in camaras) + "</div>"
+
+
+def render_familia(user, familiares, camaras, pendientes, maximo, notice=None, enlace=None) -> str:
+    invitar = ('<form method="post" action="/familia/invitar" class="form-linea" style="margin-top:24px">'
+               '<label>Nombre<input name="nombre" maxlength="120" required></label>'
+               '<label>Correo<input name="email" type="email" maxlength="254" autocomplete="off"></label>'
+               '<label>Teléfono<input name="phone" inputmode="tel" maxlength="20" autocomplete="off"></label>'
+               '<div><button class="btn" type="submit">Crear invitación</button></div>'
+               f'<fieldset style="grid-column:1/-1;border:0;padding:0"><legend class="analisis__descripcion">Qué cámaras podrá ver</legend>{_casillas_camaras(camaras)}</fieldset></form>'
+               f'<p class="analisis__descripcion">Hasta {maximo} familiares. Ven en vivo y el historial solo de las cámaras que elijas, '
+               'y reciben sus alertas si vinculan Telegram. No ven el plan ni pagos.</p>')
+    if familiares:
+        filas = []
+        for f in familiares:
+            filas.append(f'<tr><td>{esc(f["full_name"])}<br><span class="analisis__descripcion">{esc(enmascarar(f["email"], f["phone"]))}</span></td>'
+                         f'<td><form method="post" action="/familia/{esc(f["id"])}/camaras">{_casillas_camaras(camaras, set(f["camaras"]))}'
+                         '<button class="btn btn--texto" type="submit">Guardar cámaras</button></form></td>'
+                         f'<td><form method="post" action="/familia/{esc(f["id"])}/quitar"><button class="btn btn--peligro" type="submit">Quitar</button></form></td></tr>')
+        lista = ('<div class="tabla-personas__envoltura"><table class="tabla-personas"><thead><tr><th>Familiar</th><th>Cámaras que ve</th><th></th>'
+                 '</tr></thead><tbody>' + "".join(filas) + "</tbody></table></div>")
+    else:
+        lista = '<p class="analisis__descripcion">Todavía no invitaste a nadie.</p>'
+    secciones = _seccion("familia-lista", "Tus familiares", lista) + _seccion("familia-pendientes", "Invitaciones pendientes",
+                                                                             _tabla_pendientes(pendientes, "/familia/invitaciones"))
+    return fill(read_template("familia.html"), nav=nav(user, "familia"),
+                descripcion="Comparte tus cámaras con tu familia sin compartir tu contraseña. Puedes cambiar o quitar el acceso cuando quieras.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace=_bloque_enlace(enlace), invitar=invitar, secciones=secciones)
+
+
+def render_invitacion(inv=None, error=None, token="") -> str:
+    """La página pública para aceptar una invitación (usa el mismo marco que «Recuperar contraseña»)."""
+    if inv is None:
+        cuerpo = ('<div class="analisis__texto"><h1 class="analisis__titulo pixel" id="titulo-acceso">Esta invitación ya no sirve</h1>'
+                  '<p class="analisis__descripcion">Pudo vencer, ya se usó o fue revocada. Pide un enlace nuevo a quien te invitó.</p></div>')
+    else:
+        rol = ROLES_TEXTO.get(inv["role"], "Vecino")
+        usuario = inv["email"] or inv["phone"]
+        cuerpo = ('<div class="analisis__texto"><h1 class="analisis__titulo pixel" id="titulo-acceso">Te invitaron a INTIVISION</h1>'
+                  f'<p class="analisis__descripcion">{esc(inv["invitado_por"] or "Tu comunidad")} te invitó a «{esc(inv["comunidad"])}» como {rol}. '
+                  f'Tu usuario será <strong>{esc(usuario)}</strong>.</p></div>'
+                  f'<form class="formulario" method="post" action="/invitacion/{esc(token)}" autocomplete="off">'
+                  + _campo_clave("nueva", "Elige tu contraseña", "new-password", minimo=True)
+                  + _campo_clave("confirmacion", "Repítela", "new-password", minimo=True) + _reglas_clave()
+                  + '<label style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox" name="acepta" value="1" required style="margin-top:4px">'
+                  '<span class="analisis__descripcion">Acepto que INTIVISION use mi nombre y mi contacto para darme acceso a las cámaras que '
+                  'me correspondan y enviarme alertas, y que una IA describa las fotos de los eventos (con los rostros desenfocados antes de '
+                  'enviarlas). Puedo darme de baja cuando quiera.</span></label>'
+                  + (_estado_login(error) if error else "")
+                  + '<div><button class="btn" type="submit">Crear mi cuenta</button></div></form>')
+    return fill(read_template("recuperar.html"), contenido='<div class="contenedor analisis">' + cuerpo + "</div>").replace(
+        "<title>Recuperar contraseña · INTIVISION</title>", "<title>Invitación · INTIVISION</title>", 1)
+
+
+
+# ------------------------------------------------------------------ comunicados y asistente
+
+def _parrafos(texto) -> str:
+    return esc(texto or "")
+
+
+def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, ia_disponible=False) -> str:
+    from backend import comunicados as com
+    componer = ""
+    if user["role"] == "community_admin":
+        b = borrador or {}
+        opciones = "".join(
+            f'<option value="{a}"{" selected" if a == b.get("audiencia", "todos") else ""}>{com.AUDIENCIA_TEXTO[a]} · '
+            f'{(alcances or {}).get(a, {}).get("total", 0)} personas, {(alcances or {}).get(a, {}).get("telegram", 0)} con Telegram</option>'
+            for a in com.AUDIENCIAS)
+        idea = ('<form method="post" action="/comunicados/redactar" class="form-columna">'
+                '<label for="idea">1. Escribe la idea con tus palabras</label>'
+                f'<textarea id="idea" name="idea" maxlength="1500" placeholder="Ej.: reunión de la junta el sábado a las 7 pm en el parque para hablar de la cámara nueva">{esc(b.get("idea", ""))}</textarea>'
+                + ('<div><button class="btn" type="submit">Redactar con IA</button></div>' if ia_disponible else
+                   '<p class="analisis__descripcion">La IA no está configurada en este servidor: escribe el comunicado directamente abajo.</p>')
+                + '</form>')
+        envio = ('<form method="post" action="/comunicados/enviar" class="form-columna">'
+                 '<label for="titulo">2. Revisa y edita antes de enviar · Título</label>'
+                 f'<input id="titulo" name="titulo" maxlength="120" required value="{esc(b.get("titulo", ""))}">'
+                 '<label for="mensaje">Mensaje</label>'
+                 f'<textarea id="mensaje" name="mensaje" maxlength="1500" required>{esc(b.get("mensaje", ""))}</textarea>'
+                 f'<label for="audiencia">¿A quién?</label><select id="audiencia" name="audiencia">{opciones}</select>'
+                 f'<input type="hidden" name="ai" value="{"1" if b.get("ai") else "0"}">'
+                 '<div><button class="btn" type="submit">Enviar a la comunidad</button></div>'
+                 '<p class="analisis__descripcion">Llega a la vez por Telegram a quienes lo tienen vinculado, y todos lo ven aquí, en «Comunicados».</p></form>')
+        componer = idea + envio
+    tarjetas = []
+    for c in lista:
+        meta = f'{esc(suscripciones_fecha(c["created_at"]))} · {esc(c["autor"] or "Administración")} · {com.AUDIENCIA_TEXTO.get(c["audience"], "")}'
+        if user["role"] == "community_admin":
+            meta += f' · llegó por Telegram a {c["enviados"]} de {c["recipients"]}'
+        tarjetas.append(f'<article class="tarjeta-comunicado"><h3>{esc(c["title"])}</h3><span class="tarjeta-comunicado__meta">{meta}'
+                        + (' <span class="marca-ia">redactado con IA</span>' if c["ai_assisted"] else "")
+                        + f'</span><p class="tarjeta-comunicado__cuerpo">{_parrafos(c["body"])}</p></article>')
+    listado = ('<div class="lista-comunicados">' + "".join(tarjetas) + "</div>") if tarjetas else \
+        '<p class="analisis__descripcion">Todavía no hay comunicados.</p>'
+    return fill(read_template("comunicados.html"), nav=nav(user, "comunicados"),
+                descripcion=("Avisos de la junta para toda la comunidad." if user["role"] != "community_admin" else
+                             "Escribe la idea, deja que la IA la redacte, revísala y envíala a toda la comunidad a la vez."),
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=componer,
+                secciones=_seccion("lista-comunicados", "Comunicados", listado))
+
+
+def render_asistente(user, limite, usadas, recientes, notice=None, pregunta="", respuesta=None) -> str:
+    if limite <= 0:
+        destino = ('<a class="btn" href="/plan">Ver el Plan Premium</a>' if user.get("role") in ("resident", "community_admin") else
+                   '<p class="analisis__descripcion">Pídele a tu vecino o a la administración que activen el Plan Premium.</p>')
+        cuerpo = ('<div class="form-columna"><p class="analisis__descripcion">Pregunta en tus propias palabras: «¿Pasó algo anoche?», '
+                  '«¿Cuántas alertas hubo esta semana en el portón?». Es parte del Plan Premium.</p>' + destino + '</div>')
+        return fill(read_template("asistente.html"), nav=nav(user, "asistente"), descripcion="Tus cámaras responden tus preguntas.",
+                    aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=cuerpo, secciones="")
+    ejemplos = ("¿Pasó algo anoche?", "¿Cuántas alertas hubo esta semana y en qué cámara?", "¿A qué hora suele haber más alertas?",
+                "¿Hubo alguna alerta de nivel alto hoy?")
+    formulario = ('<form method="post" action="/asistente" class="form-columna"><label for="pregunta">Tu pregunta</label>'
+                  f'<textarea id="pregunta" name="pregunta" maxlength="500" required>{esc(pregunta)}</textarea>'
+                  '<div class="ejemplos">' + "".join(f'<button type="submit" name="ejemplo" value="{esc(e)}">{esc(e)}</button>' for e in ejemplos)
+                  + '</div><div><button class="btn" type="submit">Preguntar</button></div>'
+                  f'<p class="analisis__descripcion">Hoy te quedan {max(0, limite - usadas)} de {limite} preguntas. También puedes preguntar en Telegram: '
+                  '<strong>/pregunta</strong> seguido de tu pregunta.</p></form>')
+    if respuesta is not None:
+        formulario += ('<div class="form-columna"><span class="marca-ia">respuesta de la IA · verifica en el historial</span>'
+                       f'<div class="respuesta-ia">{esc(respuesta)}</div></div>')
+    previas = "".join(f'<article class="tarjeta-comunicado"><h3>{esc(r["question"])}</h3>'
+                      f'<span class="tarjeta-comunicado__meta">{esc(suscripciones_fecha(r["created_at"]))}</span>'
+                      f'<p class="tarjeta-comunicado__cuerpo">{esc(r["answer"] or "")}</p></article>' for r in recientes)
+    secciones = _seccion("asistente-recientes", "Tus últimas preguntas", f'<div class="lista-comunicados">{previas}</div>') if recientes else ""
+    return fill(read_template("asistente.html"), nav=nav(user, "asistente"),
+                descripcion="Pregunta en tus palabras. Respondo solo con lo que puedes ver en INTIVISION; nunca cambio nada.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=formulario, secciones=secciones)

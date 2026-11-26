@@ -13,7 +13,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ultralytics trae opencv-python (con interfaz gráfica); se reemplaza por la versión headless
-RUN pip uninstall -y opencv-python && pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless
+# Versión 4.x fijada: trae el detector de rostros (CascadeClassifier) que usa el desenfoque antes de describir con IA; OpenCV 5 lo quitó.
+RUN pip uninstall -y opencv-python && pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.14.0.94
 
 # Pre-descarga los modelos de personas y de postura para que funcione sin internet
 RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-pose.pt')"

@@ -1,0 +1,38 @@
+# Actualizaciones semanales de dependencias (auditorías run-1/run-2: dependencias e imágenes sin fijar).
+version: 2
+updates:
+  - package-ecosystem: pip          # servidor y detector (requirements.txt)
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: pip          # agente de la mini PC (edge/requirements*.txt)
+    directory: /edge
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker       # Dockerfile del detector
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker       # backend/Dockerfile
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker       # edge/Dockerfile
+    directory: /edge
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

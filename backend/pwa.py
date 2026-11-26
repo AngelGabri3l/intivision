@@ -103,12 +103,43 @@ HEAD_TAGS = (
 SESION_JS = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "sesion.js"), encoding="utf-8").read()
 
 
+MENU_CSS = """<style id="menu-usuario-css">
+.menu-usuario { position: relative; }
+.menu-usuario > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 2px; }
+.menu-usuario > summary::-webkit-details-marker { display: none; }
+.menu-usuario > summary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.menu-usuario__avatar { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid hsl(var(--foreground)); font-size: 13px; font-weight: 700; flex: none; }
+.menu-usuario__texto { display: flex; flex-direction: column; min-width: 0; text-align: left; line-height: 1.25; }
+.menu-usuario__nombre { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
+.menu-usuario__rol { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.menu-usuario__flecha { font-size: 12px; transition: transform .15s; }
+.menu-usuario[open] .menu-usuario__flecha { transform: rotate(180deg); }
+.solo-lectores { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.menu-usuario__panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; min-width: 250px; display: grid; padding: 6px;
+  background: hsl(var(--card)); color: hsl(var(--card-foreground)); border: 1px solid hsl(var(--foreground)); box-shadow: 4px 4px 0 0 hsl(var(--foreground)); }
+.menu-usuario__cabecera { display: none; padding: 10px 12px; border-bottom: 1px solid hsl(var(--border)); }
+.menu-usuario__cabecera span { display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.menu-usuario__panel a, .menu-usuario__salir { display: flex; align-items: center; width: 100%; min-height: 44px; padding: 0 12px; background: none; border: 0;
+  border-left: 3px solid transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; text-decoration: none; cursor: pointer; }
+.menu-usuario__panel a:hover, .menu-usuario__salir:hover { background: hsl(var(--muted)); }
+.menu-usuario__panel a[aria-current="page"] { border-left-color: hsl(var(--accent)); font-weight: 700; }
+.menu-usuario__panel form { margin: 0; border-top: 1px solid hsl(var(--border)); margin-top: 4px; padding-top: 4px; }
+@media (max-width: 560px) { .menu-usuario__texto, .menu-usuario__flecha { display: none; } .menu-usuario__cabecera { display: block; } .menu-usuario__panel { min-width: 220px; } }
+</style>"""
+def _con_menu(pagina: str) -> str:
+    """Los estilos del menú de usuario, en <head> y una sola vez por página (su script va dentro del script de sesión)."""
+    if "menu-usuario-css" not in pagina and "</head>" in pagina:
+        pagina = pagina.replace("</head>", MENU_CSS + "</head>", 1)
+    return pagina
+
+
 def _script_sesion(nonce: str) -> str:
     return '<script nonce="' + nonce + '">' + SESION_JS + "</script>"
 
 
 def inject_sesion(pagina: str, nonce: str) -> str:
     """Le agrega a una página con sesión el aviso de actividad de la persona (ver templates/sesion.js)."""
+    pagina = _con_menu(pagina)
     script = _script_sesion(nonce)
     i = pagina.rfind("</body>")
     return pagina[:i] + script + pagina[i:] if i != -1 else pagina + script
@@ -120,5 +151,6 @@ def inject(pagina: str, nonce: str) -> str:
                 '{ navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {}); }); }</script>') + _script_sesion(nonce)
     if "</head>" in pagina:
         pagina = pagina.replace("</head>", HEAD_TAGS + "</head>", 1)
+    pagina = _con_menu(pagina)
     i = pagina.rfind("</body>")
     return pagina[:i] + registro + pagina[i:] if i != -1 else pagina + registro

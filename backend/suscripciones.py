@@ -85,6 +85,8 @@ class ErrorPago(Exception):
 def crear_sesion(cur, user, scope: str) -> str:
     """Abre una sesión de pago para pasar a Premium (de la vivienda o de la comunidad). Devuelve su identificador."""
     from backend import pasarela
+    if user["role"] not in ("resident", "community_admin"):
+        raise ErrorPago("Tu cuenta no administra planes.", "prohibido")
     p = plan(cur, "premium")
     if scope == "comunidad":
         if user["role"] != "community_admin":
@@ -305,6 +307,14 @@ def baja_efectiva(cur, user_id, motivo) -> dict:
         _mp_estado(fila, "cancelled", estricto=False)
     cur.execute("DELETE FROM payment_methods WHERE user_id = %s", (user_id,))
     cur.execute("UPDATE users SET status = 'canceled' WHERE id = %s", (user_id,))
+    cur.execute("DELETE FROM camera_shares WHERE user_id = %s OR camera_id IN (SELECT id FROM cameras WHERE user_id = %s)", (user_id, user_id))
+    # Sus familiares dependen de su cuenta: también se cierran (sin cámaras propias que desasignar).
+    cur.execute("""UPDATE users SET status = 'canceled' WHERE sponsor_id = %s AND role = 'family' AND status <> 'canceled' RETURNING id""", (user_id,))
+    familiares = [r["id"] for r in cur.fetchall()]
+    if familiares:
+        cur.execute("UPDATE sessions SET revoked_at = now() WHERE user_id = ANY(%s::uuid[]) AND revoked_at IS NULL", ([str(f) for f in familiares],))
+        cur.execute("DELETE FROM notification_channels WHERE user_id = ANY(%s::uuid[])", ([str(f) for f in familiares],))
+        cur.execute("UPDATE invitations SET revoked_at = now() WHERE sponsor_id = %s AND accepted_at IS NULL AND revoked_at IS NULL", (user_id,))
     cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, subject_user_id, action, entity, entity_id, meta)
                    VALUES ('user', %s, %s, %s, 'offboarding', 'user', %s, %s::jsonb)""",
                 (user_id, u["community_id"], user_id, str(user_id), json.dumps({"camaras": len(camaras), "motivo": motivo})))

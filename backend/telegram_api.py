@@ -78,10 +78,12 @@ class Telegram:
             data["offset"] = offset
         return self._call("getUpdates", data=data, timeout=timeout + 10) or []
 
-    def send_message(self, chat_id, text, reply_markup=None):
+    def send_message(self, chat_id, text, reply_markup=None, reply_to=None):
         data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
         if reply_markup:
             data["reply_markup"] = json.dumps(reply_markup)
+        if reply_to:
+            data["reply_parameters"] = json.dumps({"message_id": int(reply_to), "allow_sending_without_reply": True})
         return self._call("sendMessage", data=data, timeout=15)
 
     def answer_callback_query(self, callback_id, text=None, alert=False):

@@ -4,7 +4,7 @@ auth.py — Inicio de sesión, sesiones por cookie y roles (VIGIA-23).
 - Contraseñas con bcrypt (nunca en texto plano).
 - Sesión: cookie HttpOnly con un token aleatorio; en la base solo se guarda su hash (SHA-256).
 - Bloqueo temporal tras varios intentos fallidos.
-- Roles: 'resident' (ve lo suyo) y 'community_admin' (ve lo de su comunidad).
+- Roles: 'resident' (ve lo suyo), 'community_admin' (ve lo de su comunidad), 'guard' (zonas comunes) y 'family' (lo compartido).
 - Una sola función, current_user, devuelve al usuario de la sesión: todas las rutas la reutilizan.
 """
 import collections
@@ -52,7 +52,7 @@ SESSION_MAX_DAYS_RESIDENT = _entorno_positivo("SESSION_MAX_DAYS_RESIDENT", 7)   
 
 def session_policy(role):
     """(inactividad, duración máxima) en segundos para ese rol. La inactividad nunca pasa de la duración máxima."""
-    if role == "community_admin":
+    if role in ("community_admin", "guard"):            # el vigilante suele usar un equipo compartido: sesión corta
         idle, maximo = SESSION_IDLE_MIN_ADMIN * 60, SESSION_MAX_H_ADMIN * 3600
     else:
         idle, maximo = SESSION_IDLE_H_RESIDENT * 3600, SESSION_MAX_DAYS_RESIDENT * 86400
@@ -67,7 +67,7 @@ MAX_IDENTIFIER_CHARS = 254           # largo máximo de un correo
 MAX_PASSWORD_CHARS = 1024            # nada razonable pasa de esto; evita enviar textos gigantes
 LOGIN_IP_MAX_FAILURES = int(os.environ.get("LOGIN_IP_MAX_FAILURES", "30"))     # intentos fallidos por IP...
 LOGIN_IP_WINDOW_SECONDS = int(os.environ.get("LOGIN_IP_WINDOW_SECONDS", "900"))  # ...en esta ventana (15 min)
-ROLES = ("resident", "community_admin")
+ROLES = ("resident", "community_admin", "guard", "family")
 
 
 class NotAuthenticated(Exception):
