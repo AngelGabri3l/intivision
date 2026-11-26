@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend import db, auth, cameras, pages, alerts, sources, ingest_media, live, pwa  # noqa: E402
 from backend import hitl, dashboard, mapa, planes, evidencia_premium, suscripciones, mercadopago, cuenta, acceso, personas, descripciones  # noqa: E402
-from backend import asistente, comunicados  # noqa: E402
+from backend import asistente, comunicados, pasarela  # noqa: E402
 from backend.pages import fill  # noqa: E402
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,7 +55,8 @@ def load_cfg():
 
 MENSAJE_ACCESO = "Usuario o contraseña incorrectos."      # el MISMO texto para todo fallo: no revela qué cuentas existen
 NIVELES = ("BAJO", "MEDIO", "ALTO")
-IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+IMAGE_NAME_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")   # sin «..» ni punto al inicio
+RETENCION_SIN_CAMARA_DIAS = 7            # una foto sin cámara también caduca
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -171,10 +172,9 @@ def apply_security_headers(request: Request, response):
     h["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=(self), payment=(), usb=()"      # geolocation: solo nuestras páginas (ubicar una cámara con el GPS)
     h["Cross-Origin-Opener-Policy"] = "same-origin"
     h["Cross-Origin-Resource-Policy"] = "same-origin"
-    # Las fotos pueden guardarse un rato en el navegador de su dueño y los íconos de la PWA en el de cualquiera; todo lo demás, nunca.
+    # Solo los mosaicos del mapa y los íconos de la PWA se guardan; las fotos y todo lo demás, nunca (quitar un permiso debe surtir efecto ya).
     ruta = request.url.path
-    h["Cache-Control"] = ("private, max-age=600" if ruta.startswith("/evidence/")
-                          else "private, max-age=86400" if ruta.startswith("/mapa/teselas/")
+    h["Cache-Control"] = ("private, max-age=86400" if ruta.startswith("/mapa/teselas/")
                           else "public, max-age=86400" if ruta.startswith(("/icons/", "/static/leaflet/")) else "no-store")
     if auth.cookie_is_secure(request):
         h["Strict-Transport-Security"] = "max-age=31536000"
@@ -271,7 +271,7 @@ def insert_event(e, user=None, community_id=None, source_kind="browser", camera_
                 size = os.path.getsize(os.path.join(EVIDENCE_DIR, image))
             except OSError:
                 size = 0
-            dias = int(planes.de_camara(cur, camera_id).get("retention_days") or 7) if camera_id else None
+            dias = int(planes.de_camara(cur, camera_id).get("retention_days") or 7) if camera_id else RETENCION_SIN_CAMARA_DIAS
             cur.execute(
                 """INSERT INTO media_files (community_id, user_id, camera_id, event_id, kind,
                                             storage_key, size_bytes, expires_at)
@@ -515,6 +515,7 @@ def recuperar_pedir(request: Request, identifier: str = Form("")):
     qué cuentas existen. Hay un límite por conexión y otro por cuenta.
     """
     ip = auth.client_ip(request)
+    base_publica = _base_publica(request)          # primero y para todos: una mala configuración no revela qué cuentas existen
     if cuenta.ip_limitada(ip):
         return HTMLResponse(pages.render_recuperar("pedir", "Demasiados pedidos desde esta conexión. Espera unos minutos.", identifier=identifier[:254]),
                             status_code=429, headers=_PAGINA_PRIVADA)
@@ -526,7 +527,7 @@ def recuperar_pedir(request: Request, identifier: str = Form("")):
     if resultado:
         user_id, token = resultado
         _avisar_por_telegram(user_id, f"🔑 Pediste cambiar tu contraseña de INTIVISION. Abre este enlace (vale {cuenta.TOKEN_MINUTOS} minutos y se usa una sola vez):\n"
-                                      f"{_base_publica(request)}/recuperar/{token}\nSi no fuiste tú, ignora este mensaje.")
+                                      f"{base_publica}/recuperar/{token}\nSi no fuiste tú, ignora este mensaje.")
     return HTMLResponse(pages.render_recuperar("enviado"), headers=_PAGINA_PRIVADA)
 
 
@@ -919,6 +920,9 @@ def startup():
     except psycopg2.OperationalError as ex:
         # La base puede arrancar después: se reintenta en cada petición.
         log.error("Todavía no se puede usar la base de datos: %s", ex)
+    if not os.environ.get("PUBLIC_BASE_URL"):
+        log.error("Falta PUBLIC_BASE_URL: no se podrán generar los enlaces de invitación ni de recuperación de contraseña.")
+    threading.Thread(target=evidencia_premium.purga_forever, args=(_parar_suscripciones, EVIDENCE_DIR), name="purga-evidencias", daemon=True).start()
     get_dispatcher()
     cfg = load_cfg()
     alerts.configure(cfg.get("notifier", {}).get("telegram_token"), EVIDENCE_DIR, os.environ.get("PUBLIC_BASE_URL", ""))
@@ -1105,8 +1109,8 @@ async def ingest(request: Request):
         e = json.loads(crudo)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "El cuerpo no es un JSON válido."})
-    if es_formulario and isinstance(e, dict):
-        e.pop("image", None)                                           # el nombre de la foto lo pone el servidor
+    if isinstance(e, dict):
+        e.pop("image", None)               # el nombre de la foto lo pone SIEMPRE el servidor: un cliente no puede reclamar un archivo ajeno
     limpio, motivo = validate_event(e)
     if motivo:
         return JSONResponse(status_code=422, content={"error": motivo})
@@ -1581,7 +1585,7 @@ def evidence(name: str, request: Request, user: dict = Depends(auth.current_user
     with db.cursor() as cur:
         alcance, args = acceso.posicional(acceso.evidencias(user, "m", "c"), user)     # quién ve qué: acceso.py
         cur.execute(f"""SELECT m.user_id, c.user_id AS camera_owner FROM media_files m LEFT JOIN cameras c ON c.id = m.camera_id
-                        WHERE m.storage_key = %s AND {alcance}""", [safe] + args)
+                        WHERE m.storage_key = %s AND (m.expires_at IS NULL OR m.expires_at > now()) AND {alcance}""", [safe] + args)
         row = cur.fetchone()
         path = os.path.join(EVIDENCE_DIR, safe)
         if row is None or not os.path.exists(path):
@@ -1728,7 +1732,17 @@ def plan_checkout(scope: str = Form(""), user: dict = Depends(auth.current_user)
 
 
 def _base_publica(request) -> str:
-    return (os.environ.get("PUBLIC_BASE_URL") or str(request.base_url)).rstrip("/")
+    """
+    La dirección pública para enlaces sensibles (invitación, recuperar contraseña, retorno de Mercado Pago): sale de PUBLIC_BASE_URL,
+    nunca del encabezado Host de quien hace la petición (se podría falsificar para mandar el enlace a otro sitio). Solo en una
+    máquina local se acepta la dirección de la petición.
+    """
+    base = (os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if base:
+        return base
+    if (request.url.hostname or "").lower() in ("localhost", "127.0.0.1", "::1", "testserver"):
+        return str(request.base_url).rstrip("/")
+    raise RuntimeError("Falta PUBLIC_BASE_URL")
 
 
 @app.get("/pagos/mercadopago/ir/{sid}", response_class=HTMLResponse)
@@ -1798,8 +1812,15 @@ async def mercadopago_webhook(request: Request):
     return {"ok": True, "resultado": resultado}
 
 
+def _simulada_activa() -> bool:
+    """La tarjeta de prueba solo funciona con la pasarela simulada: con Mercado Pago activo, estas rutas no dan Premium."""
+    return suscripciones.pasarela() == "simulada"
+
+
 @app.get("/pagos/checkout/{sid}", response_class=HTMLResponse)
 def checkout_page(sid: str, user: dict = Depends(auth.current_user)):
+    if not _simulada_activa():
+        return RedirectResponse("/plan?m=sesion", status_code=303)
     with db.cursor() as cur:
         s = suscripciones.sesion(cur, user, sid)
     if s is None or s["status"] != "open":
@@ -1811,6 +1832,8 @@ def checkout_page(sid: str, user: dict = Depends(auth.current_user)):
 def checkout_pay(sid: str, numero: str = Form(""), vence: str = Form(""), cvc: str = Form(""), nombre: str = Form(""),
                  user: dict = Depends(auth.current_user)):
     """Procesa la tarjeta. El número nunca se guarda ni se registra; un rechazo queda en el historial de pagos."""
+    if not _simulada_activa():
+        return RedirectResponse("/plan?m=sesion", status_code=303)
     error = resultado = None
     with db.cursor() as cur:
         try:
@@ -1897,6 +1920,8 @@ def plan_baja(request: Request, confirmacion: str = Form(""), user: dict = Depen
 
 @app.get("/pagos/3ds/{pid}", response_class=HTMLResponse)
 def tres_ds_page(pid: str, user: dict = Depends(auth.current_user)):
+    if not _simulada_activa():
+        return RedirectResponse("/plan?m=sesion", status_code=303)
     with db.cursor() as cur:
         pago = _pago_3ds(cur, user, pid)
     if pago is None:
@@ -1906,6 +1931,8 @@ def tres_ds_page(pid: str, user: dict = Depends(auth.current_user)):
 
 @app.post("/pagos/3ds/{pid}")
 def tres_ds_decide(pid: str, decision: str = Form(""), user: dict = Depends(auth.current_user)):
+    if not _simulada_activa():
+        return RedirectResponse("/plan?m=sesion", status_code=303)
     with db.cursor() as cur:
         pago = _pago_3ds(cur, user, pid)
         if pago is None:
@@ -1923,7 +1950,14 @@ def tres_ds_decide(pid: str, decision: str = Form(""), user: dict = Depends(auth
 
 @app.post("/pagos/webhook")
 async def pagos_webhook(request: Request):
-    """Eventos de la pasarela (como los webhooks de Stripe): firma HMAC en «Pasarela-Signature», cada evento se aplica una sola vez."""
+    """
+    Eventos de la pasarela SIMULADA (como los webhooks de Stripe): firma HMAC en «Pasarela-Signature», cada evento se aplica una sola vez.
+    Está apagada: solo existe si se pide con PASARELA_WEBHOOK_HTTP=1 (demostración), con la pasarela simulada y con un secreto propio.
+    """
+    if not (pasarela.webhook_http_habilitado() and _simulada_activa()):
+        return JSONResponse(status_code=404, content={"error": "No encontrado."})
+    if not pasarela.secreto_http_configurado():
+        return JSONResponse(status_code=503, content={"error": "Falta PASARELA_WEBHOOK_SECRET (24 caracteres o más)."})
     cuerpo = await _read_limited(request, 65_536)
     if cuerpo is None:
         return JSONResponse(status_code=413, content={"error": "Evento demasiado grande."})
@@ -1966,8 +2000,26 @@ def alerts_page(request: Request, m: str = "", user: dict = Depends(auth.current
     return _alerts_response(request, user, notice=ALERT_NOTICES.get(m))
 
 
+def _confirmar_clave(request, user, password, ip):
+    """
+    Vincular o desvincular el Telegram cambia a dónde llegan los enlaces de recuperación y las fotos de las cámaras: no basta una sesión
+    abierta (podría ser una sesión robada), hay que escribir la contraseña. Devuelve el mensaje de error, o None si está bien.
+    """
+    if auth.throttled(ip):
+        return "Demasiados intentos desde esta conexión. Espera unos minutos."
+    with db.cursor() as cur:
+        ok, mensaje = cuenta.verificar_clave(cur, user["id"], password)
+    if not ok:
+        auth.register_failure(ip)
+    return None if ok else mensaje
+
+
 @app.post("/alerts/link", response_class=HTMLResponse)
-def alerts_link(request: Request, user: dict = Depends(auth.current_user)):
+def alerts_link(request: Request, password: str = Form(""), user: dict = Depends(auth.current_user)):
+    ip = auth.client_ip(request)
+    mal = _confirmar_clave(request, user, password, ip)
+    if mal:
+        return _alerts_response(request, user, notice=("error", mal), status=400)
     link, problema = alerts.create_link(user)
     if problema:
         return _alerts_response(request, user, notice=("error", problema), status=429 if "demasiados" in problema else 503)
@@ -1975,7 +2027,10 @@ def alerts_link(request: Request, user: dict = Depends(auth.current_user)):
 
 
 @app.post("/alerts/unlink")
-def alerts_unlink(user: dict = Depends(auth.current_user)):
+def alerts_unlink(request: Request, password: str = Form(""), user: dict = Depends(auth.current_user)):
+    mal = _confirmar_clave(request, user, password, auth.client_ip(request))
+    if mal:
+        return _alerts_response(request, user, notice=("error", mal), status=400)
     alerts.unlink(user["id"])
     return RedirectResponse("/alerts?m=desvinculado", status_code=303)
 

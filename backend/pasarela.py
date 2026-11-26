@@ -78,8 +78,24 @@ def validar_tarjeta(numero: str, vence: str, cvc: str, nombre: str, hoy: datetim
 
 # ------------------------------------------------------------------ eventos firmados (como los webhooks de Stripe)
 
+_SECRETO_DEL_PROCESO = secrets.token_bytes(32)      # solo para firmar y verificar DENTRO de este proceso (el flujo interno de pago)
+SECRETO_MINIMO = 24
+
+
+def secreto_http_configurado() -> bool:
+    """¿Hay un secreto propio (PASARELA_WEBHOOK_SECRET) para recibir eventos desde fuera? No existe ningún valor por defecto."""
+    return len(os.environ.get("PASARELA_WEBHOOK_SECRET") or "") >= SECRETO_MINIMO
+
+
+def webhook_http_habilitado() -> bool:
+    """La ruta HTTP del webhook simulado está apagada salvo que se pida con PASARELA_WEBHOOK_HTTP=1 (demostraciones)."""
+    return os.environ.get("PASARELA_WEBHOOK_HTTP", "").strip() == "1"
+
+
 def _secreto() -> bytes:
-    return (os.environ.get("PASARELA_WEBHOOK_SECRET") or "whsec_test_intivision_simulada").encode()
+    if secreto_http_configurado():
+        return os.environ["PASARELA_WEBHOOK_SECRET"].encode()
+    return _SECRETO_DEL_PROCESO      # sin secreto configurado, nadie de afuera puede firmar un evento válido
 
 
 def firmar(cuerpo: bytes, ts: int | None = None) -> str:

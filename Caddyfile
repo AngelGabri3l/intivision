@@ -5,16 +5,28 @@
 intivision.online {
 	encode gzip
 
+	# Cabeceras de seguridad de la landing (la aplicación pone las suyas).
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
 	# La mini PC sigue funcionando aunque su agent.yaml todavía apunte al dominio principal.
 	@minipc path /ingest /ingest/* /edge/*
 	handle @minipc {
+		request_body {
+			max_size 32MB
+		}
 		reverse_proxy backend:8000
 	}
 
 	# Los enlaces viejos de la aplicación (favoritos, PWA instalada, Telegram) pasan al subdominio.
 	@app path /login* /logout* /cameras* /alerts* /plan* /pagos/* /admin* /events* /evidence/* /session/* /ws/* /mapa/* /static/* /icons/* /sw.js /manifest.webmanifest /offline.html /health
 	handle @app {
-		redir https://app.intivision.online{uri} permanent
+		redir https://app.intivision.online{uri} 308
 	}
 
 	handle {
@@ -23,6 +35,11 @@ intivision.online {
 }
 
 app.intivision.online {
+	# Tope del cuerpo de una petición: un clip de 20 s pesa unos MB; nada legítimo pasa de esto.
+	request_body {
+		max_size 32MB
+	}
+	header -Server
 	reverse_proxy backend:8000
 }
 

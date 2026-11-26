@@ -142,6 +142,7 @@ def authenticate(identifier: str, password: str):
             verify_password(password, _DUMMY_HASH)
             return None, "invalid"
         if user["locked"]:
+            verify_password(password, _DUMMY_HASH)     # el mismo trabajo que una contraseña normal: el tiempo no delata el bloqueo
             return None, "locked"
         if verify_password(password, user["password_hash"]):
             cur.execute("""UPDATE users SET failed_attempts = 0, locked_until = NULL,

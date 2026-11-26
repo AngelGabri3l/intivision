@@ -123,7 +123,11 @@ def create_link(user):
 
 def unlink(user_id):
     with db.cursor() as cur:
+        cur.execute("SELECT chat_id FROM notification_channels WHERE user_id = %s AND kind = 'telegram' AND chat_id IS NOT NULL", (str(user_id),))
+        antes = cur.fetchone()
         cur.execute("DELETE FROM notification_channels WHERE user_id = %s AND kind = 'telegram'", (str(user_id),))
+    if antes and _client is not None:        # el chat que estaba vinculado se entera: si no fue su dueño, lo sabrá
+        _reply(antes["chat_id"], "Este Telegram se desvinculó de tu cuenta de INTIVISION. Si no fuiste tú, cambia tu contraseña de inmediato.")
 
 
 def set_preferences(user_id, min_level, active):
@@ -172,15 +176,24 @@ def link_chat(code, chat_id):
     """'ok' | 'invalid' | 'taken'."""
     if not isinstance(code, str) or not _CODE_RE.match(code):
         return "invalid"
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    previo = None
     try:
         with db.cursor() as cur:
+            cur.execute("""SELECT chat_id FROM notification_channels
+                           WHERE link_code_hash = %s AND link_expires_at > now() AND kind = 'telegram'""", (digest,))
+            fila = cur.fetchone()
+            previo = fila["chat_id"] if fila else None
             cur.execute("""UPDATE notification_channels
                            SET chat_id = %s, verified_at = now(), link_code_hash = NULL, link_expires_at = NULL, is_active = true
                            WHERE link_code_hash = %s AND link_expires_at > now() AND kind = 'telegram'
-                           RETURNING id""", (str(chat_id), hashlib.sha256(code.encode()).hexdigest()))
-            return "ok" if cur.fetchone() else "invalid"
+                           RETURNING id""", (str(chat_id), digest))
+            hecho = cur.fetchone() is not None
     except psycopg2.errors.UniqueViolation:
         return "taken"                                           # ese chat ya está vinculado a otra cuenta
+    if hecho and previo and str(previo) != str(chat_id) and _client is not None:
+        _reply(previo, "Tu cuenta de INTIVISION se vinculó a OTRO Telegram. Si no fuiste tú, cambia tu contraseña de inmediato.")
+    return "ok" if hecho else "invalid"
 
 
 def _reply(chat_id, text):

@@ -508,15 +508,13 @@ def generar_csv(admin, f, limite=None):
         WHERE {_donde(f, True)}
         ORDER BY e.occurred_at DESC, e.id DESC LIMIT %(limite)s"""
     with db.connection() as conn:
-        with conn.cursor(name="export_eventos", cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.itersize = LOTE_CSV
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, {**_base(admin, f), "limite": limite})
-            while True:
-                lote = cur.fetchmany(LOTE_CSV)
-                if not lote:
-                    break
-                buf = io.StringIO()
-                w = csv.writer(buf, lineterminator="\r\n")
-                for r in lote:
-                    w.writerow(_fila_csv(r))
-                yield buf.getvalue().encode("utf-8")
+            filas = cur.fetchall()                    # a lo más LIMITE_CSV filas
+    # La conexión ya volvió al grupo: un cliente lento que baja el archivo no retiene una de las pocas conexiones a la base.
+    for i in range(0, len(filas), LOTE_CSV):
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\r\n")
+        for r in filas[i:i + LOTE_CSV]:
+            w.writerow(_fila_csv(r))
+        yield buf.getvalue().encode("utf-8")

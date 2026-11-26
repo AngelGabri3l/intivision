@@ -449,6 +449,11 @@ def render_equipos(user, nonce) -> str:
                 script=read_template("equipos.js"))
 
 
+def _campo_confirmar(id_) -> str:
+    return (f'<div class="campo"><label class="campo__etiqueta" for="{id_}">Tu contraseña, para confirmar</label>'
+            f'<input class="campo__entrada" id="{id_}" name="password" type="password" autocomplete="current-password" maxlength="1024" required></div>')
+
+
 def _linked_panel(channel) -> str:
     activo = channel["is_active"]
     estado = ('<span class="punto punto--activa"></span> Vinculado · alertas activas' if activo
@@ -465,7 +470,8 @@ def _linked_panel(channel) -> str:
             f'<div><button class="btn" type="submit">Guardar</button></div></form>'
             f'<div class="canal__acciones">'
             f'<form method="post" action="/alerts/test"><button class="btn btn--texto" type="submit">Enviar mensaje de prueba</button></form>'
-            f'<form method="post" action="/alerts/unlink"><button class="btn btn--texto" type="submit">Desvincular</button></form></div>'
+            f'<form method="post" action="/alerts/unlink">{_campo_confirmar("clave-desvincular")}'
+            f'<button class="btn btn--texto" type="submit">Desvincular</button></form></div>'
             f'<p class="zona__ayuda">Desvincular detiene los avisos nuevos; los mensajes que ya llegaron siguen en tu Telegram.</p>')
 
 
@@ -506,8 +512,8 @@ def render_alerts(user, channel, configured, recent, notice=None, link=None) -> 
                          f'Si lo perdiste, genera otro.</p>')
         panel = ('<div class="canal"><p class="canal__texto">Recibe en tu celular una foto cada vez que se detecte algo en '
                  'tus cámaras. Los avisos de una cámara los recibe solo su dueño.</p>' + pendiente +
-                 '<form method="post" action="/alerts/link"><button class="btn" type="submit">'
-                 + ('Generar otro enlace' if pendiente else 'Vincular Telegram') + '</button></form></div>')
+                 '<form method="post" action="/alerts/link">' + _campo_confirmar("clave-vincular")
+                 + '<button class="btn" type="submit">' + ('Generar otro enlace' if pendiente else 'Vincular Telegram') + '</button></form></div>')
     if recent:
         avisos = "".join(delivery_row(r) for r in recent)
     else:

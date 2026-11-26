@@ -15,3 +15,12 @@ backups/
 edge/data/*
 !edge/data/.gitkeep
 edge/.env
+
+# Secretos: nunca al repositorio
+.env.*
+!.env.example
+!edge/.env.example
+*.pem
+*.key
+*.p12
+*.pfx

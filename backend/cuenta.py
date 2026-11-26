@@ -57,6 +57,26 @@ def _auditar(cur, user_id, community_id, accion, ip, meta=None):
                 (str(user_id), community_id, user_id, accion, str(user_id), auth._clean_ip(ip), json.dumps(meta or {})))
 
 
+def verificar_clave(cur, user_id, clave: str):
+    """
+    Confirma la contraseña actual para una acción delicada. Cada error cuenta para el bloqueo igual que al entrar. Devuelve (ok, mensaje).
+    """
+    cur.execute("""SELECT password_hash, (locked_until IS NOT NULL AND locked_until > now()) AS locked FROM users
+                   WHERE id = %s AND status = 'active' FOR UPDATE""", (user_id,))
+    fila = cur.fetchone()
+    if fila is None:
+        return False, "No se pudo confirmar tu contraseña."
+    if fila["locked"]:
+        return False, "Demasiados intentos. Espera unos minutos e inténtalo de nuevo."
+    if not clave or len(clave) > auth.MAX_PASSWORD_CHARS or not auth.verify_password(clave, fila["password_hash"]):
+        cur.execute("""UPDATE users SET failed_attempts = CASE WHEN failed_attempts + 1 >= %s THEN 0 ELSE failed_attempts + 1 END,
+                              locked_until = CASE WHEN failed_attempts + 1 >= %s THEN now() + make_interval(mins => %s) ELSE locked_until END
+                       WHERE id = %s""", (auth.MAX_FAILED_ATTEMPTS, auth.MAX_FAILED_ATTEMPTS, auth.LOCK_MINUTES, user_id))
+        return False, "La contraseña no es correcta."
+    cur.execute("UPDATE users SET failed_attempts = 0 WHERE id = %s", (user_id,))
+    return True, None
+
+
 # ------------------------------------------------------------------ cambiar (con la sesión abierta)
 
 def cambiar(cur, user, actual: str, nueva: str, confirmacion: str, token_sesion: str | None, ip: str | None):

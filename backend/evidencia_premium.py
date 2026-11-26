@@ -106,6 +106,22 @@ def purgar(cur, evidence_dir, ejecutar=False):
     return len(filas), total
 
 
+def purga_forever(stop, evidence_dir, cada_s: float = 3600):
+    """Cada hora borra las fotos y clips vencidos (antes solo se hacía a mano con la terminal)."""
+    import logging
+    from backend import db
+    log = logging.getLogger("backend.purga")
+    while not stop.is_set():
+        try:
+            with db.cursor() as cur:
+                n, total = purgar(cur, evidence_dir, ejecutar=True)
+            if n:
+                log.info("Se borraron %d archivo(s) vencido(s) (%.1f MB).", n, total / 1e6)
+        except Exception:       # noqa: BLE001
+            log.exception("Fallo al borrar evidencias vencidas")
+        stop.wait(cada_s)
+
+
 # ------------------------------------------------------------------ resumen semanal
 
 def destinatarios_semanales(cur):

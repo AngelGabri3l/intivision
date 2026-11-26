@@ -12,7 +12,9 @@ la cantidad de respuestas.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import select
 import socket
 import time
@@ -88,20 +90,35 @@ def _valor_scope(scopes: list[str], clave: str) -> str | None:
     return None
 
 
+def _seguro(texto, largo: int) -> str:
+    """Texto de una respuesta que viene de la red: sin caracteres de control, sin «://» ni «@» (el servidor los rechaza) y acotado."""
+    t = "".join(ch for ch in str(texto or "") if ch.isprintable())
+    return " ".join(t.replace("://", " ").replace("@", " ").split())[:largo]
+
+
+_HOST_OK = re.compile(r"^[A-Za-z0-9.:-]{1,100}$")
+_CLAVE_OK = re.compile(r"^[A-Za-z0-9:._-]{1,120}$")
+
+
 def a_fuente(r: dict) -> SourceInfo:
+    """Una respuesta ONVIF falsa o rara no puede romper el inventario: todo lo que viene de la red se limpia y se acota."""
     host = None
-    for x in r["xaddrs"]:
+    for x in r["xaddrs"][:8]:
         try:
-            host = urlsplit(x).hostname
+            candidato = urlsplit(x[:300]).hostname
         except ValueError:
-            host = None
-        if host:
+            candidato = None
+        if candidato and _HOST_OK.match(candidato):
+            host = candidato
             break
-    nombre = _valor_scope(r["scopes"], "name") or _valor_scope(r["scopes"], "hardware")
+    nombre = _seguro(_valor_scope(r["scopes"], "name") or _valor_scope(r["scopes"], "hardware"), 80) or None
     etiqueta = nombre or (f"Cámara ONVIF en {host}" if host else "Cámara ONVIF")
     if nombre and host:
         etiqueta = f"{nombre} ({host})"
-    clave = r["epr"] or f"ip-{host}"
+    epr = r["epr"] or ""
+    if epr and not _CLAVE_OK.match(epr):
+        epr = "x-" + hashlib.sha1(epr.encode("utf-8", "replace")).hexdigest()[:24]     # un identificador raro se reemplaza por su huella
+    clave = epr or f"ip-{host or uuid.uuid4().hex[:12]}"
     return SourceInfo(
         device_key=f"onvif:{clave}", kind="onvif", label=etiqueta, state="available",
         address=host, detail="falta usuario y contraseña para leer su video",

@@ -46,6 +46,7 @@ MIN_FRAME_GAP_S = 0.08               # como mucho ~12 cuadros por segundo por c�
 NO_SIGNAL_S = 5.0                    # sin cuadros durante este tiempo = «sin señal»
 LAST_FRAME_MAX_AGE_S = 600           # la última imagen en memoria sirve hasta 10 minutos
 REVALIDATE_S = float(os.environ.get("LIVE_REVALIDATE_S", "30"))   # cada cuánto se comprueba que el token de la mini PC siga vigente
+VIEWER_REVALIDATE_S = float(os.environ.get("LIVE_VIEWER_REVALIDATE_S", "15"))   # y que quien mira siga con sesión y con permiso sobre la cámara
 CONNECTS_PER_MINUTE = int(os.environ.get("LIVE_CONNECTS_PER_MINUTE", "20"))   # aperturas del visor por usuario y minuto
 
 # Códigos de cierre (los mismos que usa /ws/live, más los de este módulo)
@@ -331,17 +332,22 @@ async def handle_edge(ws: WebSocket) -> None:
         for cid in conn.cameras:
             if hub.viewers.get(cid):             # había gente mirando: se le pide el flujo otra vez
                 await hub.start_stream(cid)
+        ultima = _ahora()
         while True:
             try:
-                msg = await asyncio.wait_for(ws.receive(), timeout=REVALIDATE_S)
+                msg = await asyncio.wait_for(ws.receive(), timeout=max(0.5, REVALIDATE_S - (_ahora() - ultima)))
             except asyncio.TimeoutError:
+                msg = None
+            if _ahora() - ultima >= REVALIDATE_S:   # siempre, hable o calle: una mini PC revocada no sigue conectada por tener tráfico
+                ultima = _ahora()
                 try:
                     vigente = await asyncio.to_thread(auth.edge_from_token, token)
                 except (psycopg2.OperationalError, psycopg2.pool.PoolError):
-                    continue
+                    vigente = edge
                 if vigente is None:                # se revocó el token mientras estaba conectada
                     await _cerrar(ws, SIN_SESION)
                     break
+            if msg is None:
                 continue
             if msg["type"] == "websocket.disconnect":
                 break
@@ -391,9 +397,25 @@ async def _recibir(v: Viewer) -> None:
 
 
 async def _vigilar(v: Viewer) -> None:
-    """Cada medio segundo: ¿pasó el tiempo máximo? ¿cambió el estado de la cámara?"""
+    """
+    Cada medio segundo: ¿pasó el tiempo máximo? ¿cambió el estado de la cámara? Y cada VIEWER_REVALIDATE_S: ¿sigue con la sesión
+    abierta y con permiso sobre esta cámara? (cerró sesión, cambió su contraseña, lo dieron de baja, la cámara cambió de dueño...).
+    """
+    ultima = _ahora()
     while True:
         await asyncio.sleep(0.5)
+        if _ahora() - ultima >= VIEWER_REVALIDATE_S:
+            ultima = _ahora()
+            try:
+                usuario = await asyncio.to_thread(auth.user_from_websocket, v.ws)
+                if usuario is None:
+                    v.cerrar = SIN_SESION
+                    return
+                if await asyncio.to_thread(cameras.get_camera, usuario, v.camera_id) is None:
+                    v.cerrar = NO_EXISTE
+                    return
+            except (psycopg2.OperationalError, psycopg2.pool.PoolError):
+                pass                              # sin base no se corta a nadie: se vuelve a comprobar en el siguiente turno
         if _ahora() - v.joined > MAX_VISIT_S:
             v.offer_control({"type": "fin", "motivo": "tiempo_maximo", "segundos": MAX_VISIT_S})
             v.cerrar = TIEMPO_MAXIMO
