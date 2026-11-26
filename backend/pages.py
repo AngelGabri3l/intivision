@@ -129,7 +129,8 @@ def nav(user, active) -> str:
         return f'<a class="pestana" href="{href}"{actual}>{texto}</a>'
     return ('<div class="contenedor cabecera__fila"><div class="marca">'
             '<span class="marca__nombre pixel">INTIVISION</span><span class="marca__modulo">Guardian</span></div>'
-            f'<div class="cabecera__usuario">{menu_usuario(user, active)}</div></div>'
+            f'<div class="cabecera__usuario"><a class="boton-sos" href="/sos" title="Pedir ayuda a toda la comunidad">SOS</a>'
+            f'{menu_usuario(user, active)}</div></div>'
             '<nav aria-label="Principal" class="cabecera__pestanas"><div class="contenedor cabecera__tabs">'
             + pestana("/cameras", "Cámaras", "camaras") + pestana("/alerts", "Alertas", "alertas")
             + admin_links(user, active)
@@ -166,6 +167,11 @@ def count_text(n, singular, plural) -> str:
 
 # ------------------------------------------------------------------ tarjetas
 
+def sos_link(r) -> str:
+    return (f'<a class="evento__sos" href="/sos?evento={esc(r["id"])}">🚨 Pedir ayuda a la comunidad</a>'
+            if r.get("_puede_sos") and r.get("id") else "")
+
+
 def event_card(r, show_owner) -> str:
     """La misma tarjeta del historial del panel, ya con sus clases finales (esta pantalla no usa JavaScript)."""
     imagen = (f'<img class="evento__img" src="/evidence/{esc(r["image"])}" loading="lazy" '
@@ -180,7 +186,7 @@ def event_card(r, show_owner) -> str:
             f'<span class="evento__puntaje">Puntaje {esc(r["score"])}</span></div>'
             f'<div class="evento__motivo">{esc(r["reasons"])}</div>'
             f'<div class="evento__meta"><span class="evento__origen">{esc(origen)}</span><span>{seg}</span>'
-            f'<span>{format_when(r["created_at"])}</span></div>{linea}{ia_block(r)}{video_block(r)}{zip_link(r)}</div></div>')
+            f'<span>{format_when(r["created_at"])}</span></div>{linea}{ia_block(r)}{video_block(r)}{zip_link(r)}{sos_link(r)}</div></div>')
 
 
 def ia_block(r) -> str:
@@ -368,7 +374,8 @@ def render_camera(user, cam, events, nivel, desde, hasta, limite, has_more, mess
                + '</div></form>')
 
     if events:
-        lista = "".join(event_card(e, False) for e in events)
+        puede_sos = (cam["kind"] == "private" and es_dueno) or (cam["kind"] == "common" and user["role"] in ("community_admin", "guard"))
+        lista = "".join(event_card(dict(e, _puede_sos=puede_sos), False) for e in events)
     else:
         lista = ('<div class="vacio"><p class="vacio__titulo">'
                  + ("Ningún evento coincide con el filtro" if filtrando else "Esta cámara aún no tiene eventos")
@@ -965,7 +972,41 @@ def _parrafos(texto) -> str:
     return esc(texto or "")
 
 
-def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, ia_disponible=False) -> str:
+def difusion_form(d) -> str:
+    """El interruptor de la revisión de alertas (H6): las alertas de zonas comunes pasan por un administrador y luego llegan a todos."""
+    d = d or {"enabled": False, "timeout_s": 180}
+    minutos = "".join(f'<option value="{m}"{" selected" if d["timeout_s"] == m * 60 else ""}>{m} min</option>' for m in (2, 3, 5, 10))
+    return ('<form method="post" action="/admin/difusion" class="form-columna">'
+            '<label style="display:flex;gap:10px;align-items:flex-start;color:inherit">'
+            f'<input type="checkbox" name="activa" value="1"{" checked" if d["enabled"] else ""} style="margin-top:4px">'
+            '<span><strong>Avisar a toda la comunidad las alertas de zonas comunes.</strong> Primero llegan a la administración para '
+            'confirmarlas o descartarlas; si se confirman, o si nadie responde a tiempo, llegan a todos los vecinos. '
+            'Las cámaras privadas no se difunden: su dueño decide con el botón SOS.</span></label>'
+            f'<label for="espera">Tiempo para revisar antes de avisar a todos</label><select id="espera" name="minutos">{minutos}</select>'
+            '<div><button class="btn" type="submit">Guardar</button></div></form>')
+
+
+def render_sos(user, evento=None, notice=None) -> str:
+    """Confirmar el SOS: dos pasos para que no se envíe por un toque accidental."""
+    adjunto = ""
+    if evento:
+        adjunto = (f'<input type="hidden" name="evento" value="{esc(evento["id"])}">'
+                   f'<p class="analisis__descripcion">Se compartirá con todos la foto del evento #{esc(evento["id"])} '
+                   f'({esc(evento["camara"])}, {esc(evento["hora"])}).</p>')
+    cuerpo = ('<form method="post" action="/sos" class="form-columna">'
+              '<label for="mensaje">Qué pasa (opcional)</label>'
+              '<textarea id="mensaje" name="mensaje" maxlength="280" placeholder="Ej.: alguien intenta abrir la puerta del garaje del 214"></textarea>'
+              + adjunto +
+              '<input type="hidden" name="confirmacion" value="si">'
+              '<div><button class="btn btn--peligro boton-sos--grande" type="submit">🚨 Enviar SOS a toda la comunidad</button></div>'
+              '<p class="analisis__descripcion">Llega a la vez por Telegram a todos tus vecinos, al vigilante y a la administración, y queda '
+              'en «Comunicados». Úsalo solo en una emergencia. Si corre peligro una vida, llama también al 105.</p></form>')
+    return fill(read_template("comunicados.html").replace("<title>Comunicados · INTIVISION</title>", "<title>SOS · INTIVISION</title>"),
+                nav=nav(user, "sos"), descripcion="Pide ayuda a toda tu comunidad.",
+                aviso=alert_block(notice[1], notice[0]) if notice else "", enlace="", invitar=cuerpo, secciones="")
+
+
+def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, ia_disponible=False, difusion=None) -> str:
     from backend import comunicados as com
     componer = ""
     if user["role"] == "community_admin":
@@ -990,14 +1031,31 @@ def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, i
                  '<div><button class="btn" type="submit">Enviar a la comunidad</button></div>'
                  '<p class="analisis__descripcion">Llega a la vez por Telegram a quienes lo tienen vinculado, y todos lo ven aquí, en «Comunicados».</p></form>')
         componer = idea + envio
+    if user["role"] == "community_admin":
+        componer += difusion_form(difusion)
     tarjetas = []
     for c in lista:
+        kind = c.get("kind") or "comunicado"
         meta = f'{esc(suscripciones_fecha(c["created_at"]))} · {esc(c["autor"] or "Administración")} · {com.AUDIENCIA_TEXTO.get(c["audience"], "")}'
         if user["role"] == "community_admin":
             meta += f' · llegó por Telegram a {c["enviados"]} de {c["recipients"]}'
-        tarjetas.append(f'<article class="tarjeta-comunicado"><h3>{esc(c["title"])}</h3><span class="tarjeta-comunicado__meta">{meta}'
+        extra = ""
+        if kind == "sos":
+            foto = (f'<img class="tarjeta-comunicado__foto" src="/sos/{esc(c["id"])}/foto" loading="lazy" alt="Foto compartida con el SOS">'
+                    if c.get("event_id") else "")
+            if c.get("resolved_at"):
+                estado = f'<p class="tarjeta-comunicado__meta">✅ Atendido por {esc(c.get("atendido_por") or "la administración")}</p>'
+            elif user["role"] in ("community_admin", "guard"):
+                estado = (f'<form method="post" action="/sos/{esc(c["id"])}/atendido"><button class="btn" type="submit">'
+                          'Marcar como atendido</button></form>')
+            else:
+                estado = '<p class="tarjeta-comunicado__meta">Sin atender todavía</p>'
+            extra = foto + estado
+        clase = " tarjeta-comunicado--sos" if kind == "sos" else ""
+        titulo = ("🚨 " if kind == "sos" else "✅ " if kind == "sos_atendido" else "") + esc(c["title"])
+        tarjetas.append(f'<article class="tarjeta-comunicado{clase}"><h3>{titulo}</h3><span class="tarjeta-comunicado__meta">{meta}'
                         + (' <span class="marca-ia">redactado con IA</span>' if c["ai_assisted"] else "")
-                        + f'</span><p class="tarjeta-comunicado__cuerpo">{_parrafos(c["body"])}</p></article>')
+                        + f'</span><p class="tarjeta-comunicado__cuerpo">{_parrafos(c["body"])}</p>{extra}</article>')
     listado = ('<div class="lista-comunicados">' + "".join(tarjetas) + "</div>") if tarjetas else \
         '<p class="analisis__descripcion">Todavía no hay comunicados.</p>'
     return fill(read_template("comunicados.html"), nav=nav(user, "comunicados"),
@@ -1007,7 +1065,7 @@ def render_comunicados(user, lista, notice=None, borrador=None, alcances=None, i
                 secciones=_seccion("lista-comunicados", "Comunicados", listado))
 
 
-def render_asistente(user, limite, usadas, recientes, notice=None, pregunta="", respuesta=None) -> str:
+def render_asistente(user, limite, usadas, recientes, notice=None, pregunta="", respuesta=None, fotos=None) -> str:
     if limite <= 0:
         destino = ('<a class="btn" href="/plan">Ver el Plan Premium</a>' if user.get("role") in ("resident", "community_admin") else
                    '<p class="analisis__descripcion">Pídele a tu vecino o a la administración que activen el Plan Premium.</p>')
@@ -1024,8 +1082,14 @@ def render_asistente(user, limite, usadas, recientes, notice=None, pregunta="", 
                   f'<p class="analisis__descripcion">Hoy te quedan {max(0, limite - usadas)} de {limite} preguntas. También puedes preguntar en Telegram: '
                   '<strong>/pregunta</strong> seguido de tu pregunta.</p></form>')
     if respuesta is not None:
+        galeria = "".join(
+            f'<figure class="foto-evento"><a href="/evidence/{esc(f["imagen"])}" target="_blank" rel="noopener">'
+            f'<img src="/evidence/{esc(f["imagen"])}" loading="lazy" alt="Foto del evento #{esc(f["evento"])}"></a>'
+            f'<figcaption>#{esc(f["evento"])} · {esc(f["hora"])} · {esc(f["camara"])} · {esc(f["nivel"])}</figcaption></figure>'
+            for f in (fotos or []))
         formulario += ('<div class="form-columna"><span class="marca-ia">respuesta de la IA · verifica en el historial</span>'
-                       f'<div class="respuesta-ia">{esc(respuesta)}</div></div>')
+                       f'<div class="respuesta-ia">{esc(respuesta)}</div>'
+                       + (f'<div class="galeria-eventos">{galeria}</div>' if galeria else "") + '</div>')
     previas = "".join(f'<article class="tarjeta-comunicado"><h3>{esc(r["question"])}</h3>'
                       f'<span class="tarjeta-comunicado__meta">{esc(suscripciones_fecha(r["created_at"]))}</span>'
                       f'<p class="tarjeta-comunicado__cuerpo">{esc(r["answer"] or "")}</p></article>' for r in recientes)

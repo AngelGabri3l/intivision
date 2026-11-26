@@ -738,14 +738,18 @@ def invitacion_aceptar(token: str, request: Request, nueva: str = Form(""), conf
 
 # ---------------------- comunicados vecinales y «Pregúntale a tus cámaras» ----------------------
 
-COMUNICADOS_NOTICES = {"vacio": ("error", "Escribe primero la idea del comunicado.")}
+COMUNICADOS_NOTICES = {"vacio": ("error", "Escribe primero la idea del comunicado."),
+                       "atendido": ("ok", "SOS marcado como atendido: se avisó a toda la comunidad."),
+                       "difusion_on": ("ok", "Listo: las alertas de zonas comunes pasarán por la administración y luego llegarán a todos."),
+                       "difusion_off": ("ok", "Listo: las alertas de zonas comunes ya no se difunden a toda la comunidad.")}
 
 
 def _comunicados_response(request, user, notice=None, borrador=None, status=200):
     with db.cursor() as cur:
         lista = comunicados.listar(cur, user)
         alcances = {a: comunicados.alcance(cur, user, a) for a in comunicados.AUDIENCIAS} if user["role"] == "community_admin" else None
-    return HTMLResponse(pwa.inject(pages.render_comunicados(user, lista, notice, borrador, alcances, descripciones.configurada()),
+        difusion = hitl.community_settings(cur, user["community_id"]) if user["role"] == "community_admin" else None
+    return HTMLResponse(pwa.inject(pages.render_comunicados(user, lista, notice, borrador, alcances, descripciones.configurada(), difusion),
                                    request.state.csp_nonce), status_code=status, headers={"Cache-Control": "no-store"})
 
 
@@ -754,6 +758,8 @@ def comunicados_page(request: Request, m: str = "", p: str = "", t: str = "", us
     notice = COMUNICADOS_NOTICES.get(m)
     if m == "enviado" and p.isdigit() and t.isdigit():
         notice = ("ok", f"Comunicado enviado: le llega por Telegram a {int(t)} de {int(p)} personas, y todas lo ven aquí.")
+    if m == "sos" and t.isdigit():
+        notice = ("ok", f"🚨 SOS enviado: le llega por Telegram a {int(t)} persona(s) de tu comunidad. Si es grave, llama también al 105.")
     return _comunicados_response(request, user, notice)
 
 
@@ -780,11 +786,11 @@ def comunicados_enviar(request: Request, titulo: str = Form(""), mensaje: str = 
     return RedirectResponse(f"/comunicados?m=enviado&p={r['personas']}&t={r['telegram']}", status_code=303)
 
 
-def _asistente_response(request, user, notice=None, pregunta="", respuesta=None, status=200):
+def _asistente_response(request, user, notice=None, pregunta="", respuesta=None, status=200, fotos=None):
     with db.cursor() as cur:
         limite, usadas = asistente.cupo(cur, user)
         previas = asistente.recientes(cur, user)
-    return HTMLResponse(pwa.inject(pages.render_asistente(user, limite, usadas, previas, notice, pregunta, respuesta), request.state.csp_nonce),
+    return HTMLResponse(pwa.inject(pages.render_asistente(user, limite, usadas, previas, notice, pregunta, respuesta, fotos), request.state.csp_nonce),
                         status_code=status, headers={"Cache-Control": "no-store"})
 
 
@@ -798,10 +804,72 @@ def asistente_preguntar(request: Request, pregunta: str = Form(""), ejemplo: str
     """Responde con datos de solo lectura y los permisos de la persona (acceso.py). No cambia nada."""
     pregunta = (ejemplo or pregunta)[:500]
     with db.cursor() as cur:
-        ok, texto = asistente.responder(cur, user, pregunta, "web")
+        ok, texto, fotos = asistente.responder(cur, user, pregunta, "web")
     if not ok:
         return _asistente_response(request, user, ("alerta", texto), pregunta, status=200)
-    return _asistente_response(request, user, None, pregunta, texto)
+    return _asistente_response(request, user, None, pregunta, texto, fotos=fotos)
+
+
+# ---------------------- SOS vecinal y difusión de alertas de zonas comunes ----------------------
+
+@app.get("/sos", response_class=HTMLResponse)
+def sos_page(request: Request, evento: str = "", user: dict = Depends(auth.current_user)):
+    ev = None
+    if evento:
+        with db.cursor() as cur:
+            ev = comunicados.evento_para_sos(cur, user, evento)
+    return HTMLResponse(pwa.inject(pages.render_sos(user, ev), request.state.csp_nonce), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/sos", response_class=HTMLResponse)
+def sos_enviar(request: Request, mensaje: str = Form(""), evento: str = Form(""), confirmacion: str = Form(""),
+               user: dict = Depends(auth.current_user)):
+    """Pide ayuda a TODA la comunidad (Telegram y «Comunicados»). Dos pasos en la web; límites para que no se abuse."""
+    if confirmacion != "si":
+        return RedirectResponse("/sos", status_code=303)
+    try:
+        with db.cursor() as cur:
+            r = comunicados.enviar_sos(cur, user, mensaje, evento or None)
+    except comunicados.ErrorComunicado as e:
+        with db.cursor() as cur:
+            ev = comunicados.evento_para_sos(cur, user, evento) if evento else None
+        return HTMLResponse(pwa.inject(pages.render_sos(user, ev, ("error", str(e))), request.state.csp_nonce), status_code=422)
+    return RedirectResponse(f"/comunicados?m=sos&t={r['telegram']}", status_code=303)
+
+
+@app.post("/sos/{sos_id}/atendido")
+def sos_atendido(sos_id: int, request: Request, user: dict = Depends(auth.current_user)):
+    try:
+        with db.cursor() as cur:
+            comunicados.atender_sos(cur, user, sos_id)
+    except comunicados.ErrorComunicado as e:
+        return _comunicados_response(request, user, ("error", str(e)), status=422)
+    return RedirectResponse("/comunicados?m=atendido", status_code=303)
+
+
+@app.get("/sos/{sos_id}/foto")
+def sos_foto(sos_id: int, user: dict = Depends(auth.current_user)):
+    """La foto que quien pidió ayuda compartió con su comunidad (solo para personas de esa comunidad)."""
+    with db.cursor() as cur:
+        foto = comunicados.foto_de_sos(cur, user, sos_id)
+    ruta = os.path.join(EVIDENCE_DIR, os.path.basename(foto)) if foto else None
+    if not ruta or not os.path.exists(ruta):
+        return JSONResponse(status_code=404, content={"error": "No encontrado."})
+    return FileResponse(ruta, headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/admin/difusion")
+def difusion_guardar(activa: str = Form(""), minutos: str = Form("3"), user: dict = Depends(auth.require_admin)):
+    """Activa o apaga la revisión de alertas de zonas comunes (H6): tras revisar, o si nadie revisa a tiempo, llegan a todos."""
+    segundos = (int(minutos) if minutos in ("2", "3", "5", "10") else 3) * 60
+    with db.cursor() as cur:
+        cur.execute("""UPDATE communities SET settings = coalesce(settings, '{}'::jsonb)
+                              || jsonb_build_object('hitl_enabled', %s::boolean, 'hitl_timeout_s', %s::int) WHERE id = %s""",
+                    (activa == "1", segundos, user["community_id"]))
+        cur.execute("""INSERT INTO audit_log (actor_type, actor_id, community_id, action, entity, entity_id, meta)
+                       VALUES ('user', %s, %s, 'community_broadcast_setting', 'community', %s, %s::jsonb)""",
+                    (str(user["id"]), user["community_id"], str(user["community_id"]), json.dumps({"activa": activa == "1", "segundos": segundos})))
+    return RedirectResponse(f"/comunicados?m={'difusion_on' if activa == '1' else 'difusion_off'}", status_code=303)
 
 
 @app.post("/logout/todos")

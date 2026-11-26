@@ -196,7 +196,29 @@ _REPLIES = {
     "invalid": "Ese enlace no es válido o ya venció. Genera uno nuevo en INTIVISION, en Alertas.",
 }
 _HELP = ("Este bot envía las alertas de INTIVISION. Para vincularlo, abre INTIVISION, entra a Alertas y usa Vincular Telegram.\n"
-         "Con el Plan Premium puedes preguntar por tus cámaras: /pregunta ¿pasó algo anoche?")
+         "Con el Plan Premium puedes preguntar por tus cámaras: /pregunta ¿pasó algo anoche?\n"
+         "En una emergencia, /sos avisa a toda tu comunidad.")
+SOS_CONFIRMAR_S = 120
+_sos_pendientes = {}                                      # chat -> (momento, mensaje): esperan /sos_confirmar
+
+
+def _enviar_sos_telegram(chat_id, mensaje):
+    """SOS por Telegram: solo desde un chat vinculado; los mismos límites que en la web."""
+    from backend import asistente, comunicados
+    try:
+        with db.cursor() as cur:
+            user = asistente.usuario_de_chat(cur, chat_id)
+            if user is None:
+                _reply(chat_id, _HELP)
+                return
+            r = comunicados.enviar_sos(cur, user, mensaje)
+        _reply(chat_id, f"🚨 SOS enviado: le llega por Telegram a {r['telegram']} persona(s) de tu comunidad y queda en «Comunicados». "
+                        "Si es grave, llama también al 105.")
+    except comunicados.ErrorComunicado as e:
+        _reply(chat_id, str(e))
+    except Exception:                                      # noqa: BLE001
+        log.exception("Fallo al enviar un SOS por Telegram")
+        _reply(chat_id, "No pude enviar el SOS. Llama al 105 si es una emergencia.")
 
 
 def _responder_pregunta(chat_id, pregunta):
@@ -208,8 +230,12 @@ def _responder_pregunta(chat_id, pregunta):
             if user is None:
                 _reply(chat_id, _HELP)
                 return
-            ok, texto = asistente.responder(cur, user, pregunta, "telegram")
+            ok, texto, fotos = asistente.responder(cur, user, pregunta, "telegram")
         _reply(chat_id, ("🤖 " if ok else "") + texto)
+        for f in fotos:                                   # las fotos de los eventos que la respuesta cita
+            ruta = os.path.join(_cfg.get("evidence_dir") or "", os.path.basename(f["imagen"]))
+            if os.path.exists(ruta) and _client is not None:
+                _client.send_photo(chat_id, ruta, f"Evento #{f['evento']} · {f['hora']} · {f['camara']} · nivel {f['nivel']}")
     except Exception:                                      # noqa: BLE001
         log.exception("Fallo al responder una pregunta por Telegram")
         _reply(chat_id, "No pude responder ahora. Intenta en un momento.")
@@ -228,6 +254,19 @@ def handle_update(update):
         return
     texto = (msg.get("text") or "").strip()
     comando = texto.split(maxsplit=1)[0] if texto else ""
+    if comando == "/sos" or comando.startswith("/sos@"):
+        partes = texto.split(maxsplit=1)
+        _sos_pendientes[chat["id"]] = (time.monotonic(), partes[1] if len(partes) > 1 else "")
+        _reply(chat["id"], "⚠️ Vas a pedir ayuda a TODA tu comunidad. Si es una emergencia real, toca /sos_confirmar en los próximos 2 minutos.\n"
+                           "Si corre peligro una vida, llama ya al 105.")
+        return
+    if comando == "/sos_confirmar" or comando.startswith("/sos_confirmar@"):
+        pendiente = _sos_pendientes.pop(chat["id"], None)
+        if not pendiente or time.monotonic() - pendiente[0] > SOS_CONFIRMAR_S:
+            _reply(chat["id"], "No hay un SOS por confirmar (o pasaron más de 2 minutos). Escribe /sos para empezar.")
+        else:
+            threading.Thread(target=_enviar_sos_telegram, args=(chat["id"], pendiente[1]), daemon=True).start()
+        return
     if comando == "/pregunta" or comando.startswith("/pregunta@"):      # en grupos Telegram agrega @nombre_del_bot
         partes = texto.split(maxsplit=1)
         if len(partes) == 1:

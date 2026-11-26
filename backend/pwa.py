@@ -124,6 +124,15 @@ MENU_CSS = """<style id="menu-usuario-css">
 .menu-usuario__panel a:hover, .menu-usuario__salir:hover { background: hsl(var(--muted)); }
 .menu-usuario__panel a[aria-current="page"] { border-left-color: hsl(var(--accent)); font-weight: 700; }
 .menu-usuario__panel form { margin: 0; border-top: 1px solid hsl(var(--border)); margin-top: 4px; padding-top: 4px; }
+.boton-sos { display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; background: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground)); font-weight: 700; font-size: 13px; letter-spacing: .08em; text-decoration: none; border-radius: var(--radius); }
+.boton-sos:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.boton-sos--grande { min-height: 56px; font-size: 16px; padding: 0 24px; }
+.tarjeta-comunicado--sos { border: 2px solid hsl(var(--destructive)); }
+.tarjeta-comunicado__foto, .foto-evento img { width: 100%; max-width: 420px; border-radius: var(--radius); display: block; }
+.galeria-eventos { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-top: 12px; }
+.foto-evento { margin: 0; } .foto-evento figcaption { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+.evento__sos { display: inline-flex; align-items: center; min-height: 44px; font-size: 13px; color: hsl(var(--destructive)); }
 @media (max-width: 560px) { .menu-usuario__texto, .menu-usuario__flecha { display: none; } .menu-usuario__cabecera { display: block; } .menu-usuario__panel { min-width: 220px; } }
 </style>"""
 def _con_menu(pagina: str) -> str:
