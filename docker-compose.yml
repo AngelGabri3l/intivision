@@ -26,6 +26,17 @@ services:
       - MAP_TILE_URL=${MAP_TILE_URL:-}                 # mapa (H8): servidor de imágenes; vacío = OpenStreetMap (solo para arrancar y ensayar)
       - MQTT_USERNAME=${MQTT_USERNAME:-}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      # --- IA (Claude): descripción de las fotos, «Pregúntale a tus cámaras» y comunicados. Sin clave, esas funciones quedan apagadas. ---
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - IA_MODELO=${IA_MODELO:-claude-haiku-5-5}
+      # --- Cobros: PASARELA=mercadopago cobra de verdad con Mercado Pago; vacío = pasarela simulada (demostración) ---
+      - PASARELA=${PASARELA:-}
+      - PASARELA_WEBHOOK_SECRET=${PASARELA_WEBHOOK_SECRET:-}
+      - MP_ACCESS_TOKEN=${MP_ACCESS_TOKEN:-}
+      - MP_WEBHOOK_SECRET=${MP_WEBHOOK_SECRET:-}
+      - MP_PAYER_EMAIL_PRUEBA=${MP_PAYER_EMAIL_PRUEBA:-}
+      - SUSCRIPCIONES_CICLO=${SUSCRIPCIONES_CICLO:-1}   # 0 apaga la renovación automática (solo para pruebas)
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}            # orígenes extra permitidos para el video en vivo; normalmente vacío
     volumes:
       - ./config.yaml:/app/config.yaml:ro    
       - ./events:/app/events                  
